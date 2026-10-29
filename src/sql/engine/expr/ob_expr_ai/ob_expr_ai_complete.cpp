@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "ob_expr_ai_complete.h"
+#include <cmath>
 #include "query/ai/ob_ai_endpoint_resolver.h"
 #include "share/rc/ob_server_runtime.h"
 
@@ -55,7 +56,7 @@ int ObExprAIComplete::calc_result_typeN(ObExprResType &type,
   } else {
     types_stack[MODEL_IDX].set_calc_type(ObVarcharType);
     types_stack[MODEL_IDX].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
-    if (ob_is_string_type(types_stack[PROMPT_IDX].get_type())) {
+    if (ob_is_string_type(types_stack[PROMPT_IDX].get_type()) || ob_is_text_tc(types_stack[PROMPT_IDX].get_type())) {
       types_stack[PROMPT_IDX].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
     } else if (ob_is_json(types_stack[PROMPT_IDX].get_type())) {
     } else {
@@ -90,7 +91,8 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
   ObDatum *arg_model_id = nullptr;
   ObDatum *arg_prompt = nullptr;
   ObDatum *arg_config = nullptr;
-  if (OB_FAIL(expr.eval_param_value(ctx, arg_model_id, arg_prompt, arg_config))) {
+  if (expr.arg_cnt_ == 3 ? OB_FAIL(expr.eval_param_value(ctx, arg_model_id, arg_prompt, arg_config))
+                         : OB_FAIL(expr.eval_param_value(ctx, arg_model_id, arg_prompt))) {
   } else if (arg_model_id->is_null() || arg_prompt->is_null()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete, parameters is null");
@@ -124,21 +126,46 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
         ret = OB_INVALID_ARGUMENT;
         LOG_USER_ERROR(OB_INVALID_ARGUMENT, "prompt is not valid");
         res.set_null();
-      } else if (!ObAIFuncJsonUtils::ob_is_json_array_all_str(static_cast<ObJsonArray *>(prompt_object->get_value(ObAIFuncPromptObjectUtils::prompt_args_key)))) {
-        ret = OB_NOT_SUPPORTED;
-        LOG_USER_ERROR(OB_NOT_SUPPORTED, "prompt object is not support");
+
       } else if (OB_FAIL(ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(temp_allocator, prompt_object, prompt))) {
       }
     } else if (OB_FAIL(ObTextStringHelper::read_real_string_data(ctx.exec_ctx_, temp_allocator, *arg_prompt, expr.args_[1]->datum_meta_, expr.args_[1]->obj_meta_.has_lob_header(), prompt))) {
     }
 
     if (OB_FAIL(ret)) {
-    } else if (OB_NOT_NULL(arg_config)) {
-      if (OB_FAIL(ObTextStringHelper::read_real_string_data(ctx.exec_ctx_, temp_allocator, *arg_config, expr.args_[2]->datum_meta_, expr.args_[2]->obj_meta_.has_lob_header(), config_str))) {
+    } else if (OB_NOT_NULL(arg_config) && !arg_config->is_null()) {
+      if (ob_is_json(expr.args_[CONFIG_IDX]->datum_meta_.type_)) {
+        ObIJsonBase *value = nullptr;
+        bool is_null = false;
+        if (OB_FAIL(ObJsonExprHelper::get_json_doc(expr, ctx, temp_allocator, CONFIG_IDX, value, is_null))) {
+        } else if (is_null || OB_ISNULL(value) || value->json_type() != ObJsonNodeType::J_OBJECT) {
+          ret = OB_INVALID_ARGUMENT;
+        } else {
+          config = static_cast<ObJsonObject *>(value);
+        }
+      } else if (OB_FAIL(ObTextStringHelper::read_real_string_data(ctx.exec_ctx_, temp_allocator, *arg_config, expr.args_[2]->datum_meta_, expr.args_[2]->obj_meta_.has_lob_header(), config_str))) {
       } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_object_form_str(temp_allocator, config_str, config))) {
       }
     }
 
+    if (OB_FAIL(ret)) {
+    } else if (OB_NOT_NULL(config)) {
+      ObJsonNode *temperature = config->get_value("temperature");
+      ObJsonNode *tokens = config->get_value("max_tokens");
+      double value = 0;
+      if (OB_NOT_NULL(temperature)) {
+        if (!share::ObJsonHelper::is_number_type(temperature)) {
+          ret = OB_INVALID_ARGUMENT;
+        } else if (OB_FAIL(temperature->to_double(value))) {
+        } else if (!std::isfinite(value) || value < 0) {
+          ret = OB_INVALID_ARGUMENT;
+        }
+      }
+      if (OB_SUCC(ret) && OB_NOT_NULL(tokens)
+          && (tokens->json_type() != ObJsonNodeType::J_INT || static_cast<ObJsonInt *>(tokens)->get_int() <= 0)) {
+        ret = OB_INVALID_ARGUMENT;
+      }
+    }
     if (OB_FAIL(ret)) {
     } else if (model_id.empty() || prompt.empty()) {
       ret = OB_INVALID_ARGUMENT;

@@ -1,0 +1,27 @@
+SELECT LENGTH(AI_COMPLETE('ae_complete', 'hello', NULL)) > 0 AS complete_ok;
+complete_ok
+1
+SELECT LENGTH(AI_COMPLETE('ae_complete', AI_PROMPT('{0}:{0}', JSON_OBJECT('value', 'x')), JSON_OBJECT('temperature', 0.5, 'max_tokens', 8))) > 0 AS json_prompt_ok;
+json_prompt_ok
+1
+SELECT JSON_LENGTH(AI_EMBED('ae_embed', 'hello', 3)) AS dimensions;
+dimensions
+3
+SELECT AI_EMBED('ae_embed', NULL) IS NULL AS null_ok;
+null_ok
+1
+SELECT LENGTH(AI_COMPLETE('ae_ollama', 'hello')) > 0 AS ollama_ok;
+ollama_ok
+1
+SELECT id, AI_EMBED('ae_embed', content, 3) IS NULL AS is_null
+FROM ae_rows WHERE id <= 3 ORDER BY id LIMIT 3;
+id	is_null
+1	0
+2	1
+3	0
+SELECT JSON_LENGTH(AI_RERANK('ae_rerank', 'query', JSON_ARRAY('a','b','c'))) AS rerank_count;
+rerank_count
+3
+SELECT JSON_LENGTH(AI_RERANK('ae_rerank', 'query', JSON_ARRAY(JSON_OBJECT('id',1,'text','a'),JSON_OBJECT('id',2,'text','b')), 'text')) AS object_count;
+object_count
+2

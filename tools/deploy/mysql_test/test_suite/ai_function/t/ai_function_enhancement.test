@@ -1,0 +1,55 @@
+# Requires the competition Mock AI Service on port 8000.
+connection default;
+--disable_query_log
+--error 0,11112
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ae_complete_ep');
+--error 0,11112
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ae_embed_ep');
+--error 0,11112
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ae_ollama_ep');
+--error 0,11112
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ae_rerank_ep');
+--error 0,11118
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL('ae_complete');
+--error 0,11118
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL('ae_embed');
+--error 0,11118
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL('ae_ollama');
+--error 0,11118
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL('ae_rerank');
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL('ae_complete','{"type":"completion","model_name":"completion-model"}');
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL('ae_embed','{"type":"dense_embedding","model_name":"embedding-model"}');
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL('ae_ollama','{"type":"completion","model_name":"ollama-model"}');
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL('ae_rerank','{"type":"rerank","model_name":"rerank-model"}');
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('ae_complete_ep','{"ai_model_name":"ae_complete","provider":"openai","url":"http://127.0.0.1:8000/v1/chat/completions","access_key":"mock-only"}');
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('ae_embed_ep','{"ai_model_name":"ae_embed","provider":"openai","url":"http://127.0.0.1:8000/v1/embeddings","access_key":"mock-only"}');
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('ae_ollama_ep','{"ai_model_name":"ae_ollama","provider":"oLlAmA","url":"http://127.0.0.1:8000/api/generate","access_key":""}');
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('ae_rerank_ep','{"ai_model_name":"ae_rerank","provider":"siliconflow","url":"http://127.0.0.1:8000/v1/rerank","access_key":"mock-only"}');
+--enable_query_log
+SELECT LENGTH(AI_COMPLETE('ae_complete', 'hello', NULL)) > 0 AS complete_ok;
+SELECT LENGTH(AI_COMPLETE('ae_complete', AI_PROMPT('{0}:{0}', JSON_OBJECT('value', 'x')), JSON_OBJECT('temperature', 0.5, 'max_tokens', 8))) > 0 AS json_prompt_ok;
+SELECT JSON_LENGTH(AI_EMBED('ae_embed', 'hello', 3)) AS dimensions;
+SELECT AI_EMBED('ae_embed', NULL) IS NULL AS null_ok;
+SELECT LENGTH(AI_COMPLETE('ae_ollama', 'hello')) > 0 AS ollama_ok;
+--disable_query_log
+--disable_warnings
+DROP TABLE IF EXISTS ae_rows;
+--enable_warnings
+CREATE TABLE ae_rows(id INT PRIMARY KEY, content LONGTEXT);
+INSERT INTO ae_rows VALUES (1,'one'),(2,NULL),(3,'three'),(4,'four');
+--enable_query_log
+SELECT id, AI_EMBED('ae_embed', content, 3) IS NULL AS is_null
+FROM ae_rows WHERE id <= 3 ORDER BY id LIMIT 3;
+SELECT JSON_LENGTH(AI_RERANK('ae_rerank', 'query', JSON_ARRAY('a','b','c'))) AS rerank_count;
+SELECT JSON_LENGTH(AI_RERANK('ae_rerank', 'query', JSON_ARRAY(JSON_OBJECT('id',1,'text','a'),JSON_OBJECT('id',2,'text','b')), 'text')) AS object_count;
+--disable_query_log
+DROP TABLE ae_rows;
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ae_complete_ep');
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ae_embed_ep');
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ae_ollama_ep');
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ae_rerank_ep');
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL('ae_complete');
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL('ae_embed');
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL('ae_ollama');
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL('ae_rerank');
+--enable_query_log
