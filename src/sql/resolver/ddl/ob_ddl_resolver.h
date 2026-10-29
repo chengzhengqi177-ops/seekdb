@@ -75,6 +75,12 @@ struct ObColumnResolveStat
     is_set_null_ = false;
     is_set_not_null_ = false;
     is_set_default_value_ = false;
+    is_ai_column_ = false;
+    ai_function_ = 0;
+    ai_sync_mode_ = -1;
+    ai_max_retries_ = -1;
+    ai_expr_str_.reset();
+    ai_model_name_.reset();
   }
   int64_t to_string(char *buf, const int64_t buf_len) const
   {
@@ -86,7 +92,13 @@ struct ObColumnResolveStat
          K(is_set_null_),
          K(is_set_not_null_),
          K(is_set_default_value_),
-         K(is_unique_key_));
+         K(is_unique_key_),
+         K(is_ai_column_),
+         K(ai_function_),
+         K(ai_sync_mode_),
+         K(ai_max_retries_),
+         K(ai_expr_str_),
+         K(ai_model_name_));
     J_OBJ_END();
     return pos;
   }
@@ -97,6 +109,13 @@ struct ObColumnResolveStat
   bool is_set_not_null_;
   bool is_set_default_value_;
   bool is_unique_key_;
+  // AI COLUMN attribute collected from `col TYPE AI COLUMN (expr) [WITH (...)]`
+  bool is_ai_column_;
+  int64_t ai_function_;      // share::schema::ObAiColumnFunctionType
+  int64_t ai_sync_mode_;     // -1: not specified, otherwise ObAiColumnSyncMode
+  int64_t ai_max_retries_;   // -1: not specified
+  common::ObString ai_expr_str_;
+  common::ObString ai_model_name_;
 };
 
 struct ObDefaultValueRes
@@ -536,6 +555,9 @@ protected:
                                       bool &is_modify_column,
                                       bool &is_modify_column_visibility,
                                       const bool allow_has_default = true);
+  int resolve_ai_column_attribute(share::schema::ObColumnSchemaV2 &column,
+                                  ParseNode *attr_node,
+                                  ObColumnResolveStat &resolve_stat);
   int resolve_normal_column_attribute_check_cons(ObColumnSchemaV2 &column,
                                                  ParseNode *attrs_node,
                                                  ObCreateTableStmt *create_table_stmt);
@@ -858,6 +880,9 @@ protected:
   bool global_;
   common::ObArray<common::ObString> store_column_names_;
   common::ObArray<common::ObString> hidden_store_column_names_;
+  // AI columns already resolved in the current DDL statement (used to reject
+  // "AI column depends on another AI column" definitions).
+  common::ObArray<common::ObString> resolved_ai_column_names_;
   common::ObSEArray<share::schema::ObColumnNameWrapper, 16, common::ModulePageAllocator, true> sort_column_array_;
   common::hash::ObPlacementHashSet<share::schema::ObColumnNameHashWrapper,
                                    common::OB_MAX_COLUMN_NUMBER> storing_column_set_;

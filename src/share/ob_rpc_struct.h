@@ -1195,7 +1195,10 @@ public:
       lock_session_id_(0),
       lock_session_create_ts_(0),
       lock_priority_(transaction::tablelock::ObTableLockPriority::NORMAL),
-      data_version_(0)
+      data_version_(0),
+      is_retry_ai_column_(false),
+      retry_column_name_(),
+      retry_where_str_()
   {
   }
   virtual ~ObAlterTableArg()
@@ -1268,7 +1271,10 @@ public:
                K_(lock_session_id),
                K_(lock_session_create_ts),
                K_(lock_priority),
-               K_(data_version));
+               K_(data_version),
+               K_(is_retry_ai_column),
+               K_(retry_column_name),
+               K_(retry_where_str));
 private:
   int alloc_index_arg(const ObIndexArg::IndexActionType index_action_type, ObIndexArg *&index_arg);
 public:
@@ -1302,6 +1308,10 @@ public:
   int64_t lock_session_create_ts_;
   transaction::tablelock::ObTableLockPriority lock_priority_;
   uint64_t data_version_;
+  // ALTER TABLE ... RETRY AI COLUMN col [WHERE ...]
+  bool is_retry_ai_column_;
+  common::ObString retry_column_name_;
+  common::ObString retry_where_str_;
   int serialize_index_args(char *buf, const int64_t data_len, int64_t &pos) const;
   int deserialize_index_args(const char *buf, const int64_t data_len, int64_t &pos);
   int64_t get_index_args_serialize_size() const;

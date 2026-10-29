@@ -67,6 +67,8 @@ public:
   int resolve_convert_to_character(const ParseNode &node);
   int resolve_foreign_key_options(const ParseNode &node);
   int resolve_add_column(const ParseNode &node, ObColumnNameSet &resolve_add_column);
+  int resolve_retry_ai_column(const ParseNode &node, const bool has_other_action);
+  int check_retry_where_expr(const ParseNode &node);
   int resolve_alter_column(const ParseNode &node);
   int resolve_change_column(const ParseNode &node);
   int check_modify_column_allowed(const share::schema::AlterColumnSchema &alter_column_schema,

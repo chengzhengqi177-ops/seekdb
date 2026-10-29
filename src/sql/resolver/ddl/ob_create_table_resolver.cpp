@@ -25,6 +25,7 @@
 #include "sql/optimizer/ob_optimizer_util.h"
 #include "query/vector/ob_vector_index_util.h"
 #include "sql/resolver/ddl/ob_vec_index_builder_util.h"
+#include "share/schema/ob_ai_column_schema_helper.h"
 
 namespace oceanbase
 {
@@ -881,6 +882,48 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
         // won't be here
         ret = OB_ERR_UNEXPECTED;
         SQL_RESV_LOG(WARN, "unexpected branch", K(ret));
+      }
+    }
+
+    // append the hidden state/request/result_spec columns for every AI column,
+    // after all the user columns so that the prev/next column id chain stays ordered
+    if (OB_SUCC(ret)) {
+      ObSEArray<uint64_t, 4> ai_column_ids;
+      for (int64_t i = 0; OB_SUCC(ret) && i < table_schema.get_column_count(); ++i) {
+        const ObColumnSchemaV2 *column = table_schema.get_column_schema_by_idx(i);
+        if (OB_ISNULL(column)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (column->is_ai_column() && OB_FAIL(ai_column_ids.push_back(column->get_column_id()))) {
+          LOG_WARN("failed to push ai column id", KR(ret));
+        }
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < ai_column_ids.count(); ++i) {
+        ObColumnSchemaV2 *ai_col = table_schema.get_column_schema(ai_column_ids.at(i));
+        uint64_t hidden_column_ids[ObAiColumnSchemaHelper::AI_HIDDEN_COLUMN_COUNT];
+        if (OB_ISNULL(ai_col)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(ObAiColumnSchemaHelper::fill_ai_column_metadata(*ai_col))) {
+          LOG_WARN("failed to fill ai column metadata", KR(ret));
+        }
+        for (int64_t k = 0; OB_SUCC(ret) && k < ObAiColumnSchemaHelper::AI_HIDDEN_COLUMN_COUNT; ++k) {
+          ObColumnSchemaV2 hidden_column(allocator_);
+          hidden_column_ids[k] = static_cast<uint64_t>(gen_column_id());
+          if (OB_FAIL(ObAiColumnSchemaHelper::make_hidden_column(*ai_col,
+                  table_schema.get_table_id(), hidden_column_ids[k], k, hidden_column))) {
+            LOG_WARN("failed to make ai hidden column", KR(ret), K(k));
+          } else if (OB_FAIL(table_schema.add_column(hidden_column))) {
+            LOG_WARN("failed to add ai hidden column", KR(ret), K(k));
+          } else if (OB_FAIL(column_name_set_.set_refactored(
+                       ObColumnNameHashWrapper(hidden_column.get_column_name_str())))) {
+            LOG_WARN("failed to add hidden column name", KR(ret));
+          }
+        }
+        if (OB_SUCC(ret) && OB_FAIL(ObAiColumnSchemaHelper::set_hidden_column_ids(*ai_col,
+                hidden_column_ids[ObAiColumnSchemaHelper::AI_STATE_COLUMN],
+                hidden_column_ids[ObAiColumnSchemaHelper::AI_REQUEST_COLUMN],
+                hidden_column_ids[ObAiColumnSchemaHelper::AI_RESULT_SPEC_COLUMN]))) {
+          LOG_WARN("failed to set ai hidden column ids", KR(ret));
+        }
       }
     }
 

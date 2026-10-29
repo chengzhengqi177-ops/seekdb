@@ -10975,5 +10975,18 @@
     "info_cn": "",
     "background_cn": "",
     "ref_url": ""
+  },
+  "ai_column_strict_read": {
+    "id": 10754,
+    "name": "ai_column_strict_read",
+    "default_value": "0",
+    "base_value": "0",
+    "data_type": "bool",
+    "info": "whether reading an AI column requires all rows of that column to be ready",
+    "flags": "GLOBAL | SESSION | NEED_SERIALIZE",
+    "publish_version": "1.0.0.0",
+    "info_cn": "开启后，语句引用 AI 列时若该列存在未就绪行则报错",
+    "background_cn": "",
+    "ref_url": ""
   }
 }

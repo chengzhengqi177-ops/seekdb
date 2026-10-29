@@ -333,7 +333,7 @@ END_P SET_VAR DELIMITER
         QUANTIFIER_TABLE QUARTER QUERY QUEUE_TIME QUICK
 
         RECOVER REDUNDANT REFRESH RELAY RELAYLOG RELAY_LOG_FILE RELAY_LOG_POS RELAY_THREAD RELOAD REMOVE
-        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
+        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETRY RETURNED_SQLSTATE RETURNS RETURNING REVERSE
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
         RANK READ_ONLY RECOVERY REJECT ROLE
@@ -420,7 +420,7 @@ END_P SET_VAR DELIMITER
 %type <node> opt_float_precision opt_number_precision
 %type <node> opt_equal_mark opt_default_mark read_only_or_write not not2
 %type <node> int_or_decimal
-%type <node> opt_column_attribute_list column_attribute column_attribute_list opt_column_default_value opt_column_default_value_list
+%type <node> opt_column_attribute_list column_attribute column_attribute_list opt_column_default_value opt_column_default_value_list opt_ai_column_with_options ai_column_option_list ai_column_option
 %type <node> show_stmt from_or_in columns_or_fields database_or_schema index_or_indexes_or_keys opt_from_or_in_database_clause opt_show_condition opt_desc_column_option opt_status opt_storage opt_show_engine check_table_options check_table_option
 %type <node> prepare_stmt stmt_name preparable_stmt
 %type <node> variable_set_stmt var_and_val_list var_and_val to_or_eq set_expr_or_default sys_var_and_val
@@ -443,7 +443,7 @@ END_P SET_VAR DELIMITER
 %type <ival> opt_with_consistent_snapshot opt_config_scope opt_index_keyname opt_full opt_mode_flag opt_extended opt_extended_or_full
 %type <node> opt_priority opt_low_priority delete_option delete_option_list opt_delete_option_list
 %type <node> opt_work begin_stmt commit_stmt rollback_stmt opt_ignore opt_ignore_or_replace ignore_or_replace alter_table_stmt alter_table_actions alter_table_action_list alter_table_action alter_column_option alter_index_option alter_constraint_option standalone_alter_action alter_partition_option opt_to opt_table
-%type <node> alter_column_behavior opt_set opt_position_column
+%type <node> alter_column_behavior opt_set opt_position_column opt_retry_where
 %type <node> alter_system_stmt alter_system_set_parameter_actions alter_system_settp_actions settp_option alter_system_set_parameter_action alter_system_reset_parameter_actions alter_system_reset_parameter_action
 %type <node> opt_comment opt_as
 %type <node> column_name relation_name relation_name_list function_name column_label var_name relation_name_or_string row_format_option compression_name
@@ -6238,6 +6238,50 @@ not NULLX
 | INVISIBLE
 {
   malloc_terminal_node($$, result->malloc_pool_, T_INVISIBLE);
+}
+| AI COLUMN '(' expr ')' opt_ai_column_with_options
+{
+  (void)($1);
+  (void)($2); /* make bison mute */
+  ParseNode *ai_expr_node = $4;
+  dup_expr_string(ai_expr_node, result, @4.first_column, @4.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_ATTRIBUTE, 2, ai_expr_node, $6);
+}
+;
+
+opt_ai_column_with_options:
+WITH '(' ai_column_option_list ')'
+{
+  (void)($1); /* make bison mute */
+  merge_nodes($$, result, T_AI_COLUMN_WITH_OPTIONS, $3);
+}
+| /*EMPTY*/
+{
+  $$ = NULL;
+}
+;
+
+ai_column_option_list:
+ai_column_option_list ',' ai_column_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+| ai_column_option
+{
+  $$ = $1;
+}
+;
+
+ai_column_option:
+column_name opt_equal_mark STRING_VALUE
+{
+  (void)($2); /* make bison mute */
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_WITH_OPTION, 2, $1, $3);
+}
+| column_name opt_equal_mark INTNUM
+{
+  (void)($2); /* make bison mute */
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_WITH_OPTION, 2, $1, $3);
 }
 ;
 
@@ -14741,6 +14785,13 @@ DROP CONSTRAINT constraint_name
   (void)($3);
   $$ = NULL;
 }
+| RETRY AI COLUMN column_name opt_retry_where
+{
+  (void)($1);
+  (void)($2);
+  (void)($3); /* make bison mute */
+  malloc_non_terminal_node($$, result->malloc_pool_, T_ALTER_RETRY_AI_COLUMN, 2, $4, $5);
+}
 ;
 
 algorithm_opt:
@@ -15249,6 +15300,19 @@ opt_position_column:
 | AFTER column_name
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_ADD_AFTER, 1, $2);
+}
+;
+
+opt_retry_where:
+/* EMPTY */
+{
+  $$ = NULL;
+}
+| WHERE expr
+{
+  (void)($1); /* make bison mute */
+  dup_expr_string($2, result, @2.first_column, @2.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_WHERE_CLAUSE, 2, $2, NULL);
 }
 ;
 
@@ -17959,6 +18023,7 @@ ACCOUNT
 |       RESTART
 |       RESTORE
 |       RESUME
+|       RETRY
 |       RETURNED_SQLSTATE
 |       RETURNING
 |       RETURNS

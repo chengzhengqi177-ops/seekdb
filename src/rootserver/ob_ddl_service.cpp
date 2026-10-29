@@ -23,6 +23,8 @@
 #include "share/ob_sys_time_zone_util.h"
 
 #include "ob_ddl_service.h"
+#include "share/schema/ob_ai_column_schema_helper.h"
+#include "share/schema/ob_ai_column_sql_service.h"
 #include "rootserver/ob_runtime_ddl_service.h"
 #include "query/session/ob_inner_sql_connection_access.h"
 #include "share/ob_ddl_common.h"
@@ -7827,6 +7829,45 @@ int ObDDLService::add_new_column_to_table_schema(
       if (update_inner_table) {
         if (OB_FAIL(ddl_operator->insert_single_column(*trans,
                 new_table_schema, alter_column_schema))) {
+        }
+      }
+      if (OB_SUCC(ret) && alter_column_schema.is_ai_column()) {
+        ObColumnSchemaV2 *ai_col = new_table_schema.get_column_schema(
+            alter_column_schema.get_column_id());
+        uint64_t hidden_column_ids[ObAiColumnSchemaHelper::AI_HIDDEN_COLUMN_COUNT];
+        if (OB_ISNULL(ai_col)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("get ai column schema failed", KR(ret));
+        } else if (OB_FAIL(ObAiColumnSchemaHelper::fill_ai_column_metadata(*ai_col))) {
+          LOG_WARN("failed to fill ai column metadata", KR(ret));
+        }
+        for (int64_t k = 0; OB_SUCC(ret) && k < ObAiColumnSchemaHelper::AI_HIDDEN_COLUMN_COUNT; ++k) {
+          ObColumnSchemaV2 hidden_column(&allocator);
+          hidden_column_ids[k] = static_cast<uint64_t>(new_table_schema.get_max_used_column_id() + 1);
+          new_table_schema.set_max_used_column_id(hidden_column_ids[k]);
+          if (OB_FAIL(ObAiColumnSchemaHelper::make_hidden_column(*ai_col,
+                  new_table_schema.get_table_id(), hidden_column_ids[k], k, hidden_column))) {
+            LOG_WARN("failed to make ai hidden column", KR(ret), K(k));
+          } else if (OB_FAIL(new_table_schema.add_column(hidden_column))) {
+            LOG_WARN("failed to add ai hidden column", KR(ret), K(k));
+          } else if (update_inner_table
+                     && OB_FAIL(ddl_operator->insert_single_column(*trans,
+                            new_table_schema, hidden_column))) {
+            LOG_WARN("failed to insert ai hidden column", KR(ret), K(k));
+          }
+        }
+        if (OB_SUCC(ret) && OB_FAIL(ObAiColumnSchemaHelper::set_hidden_column_ids(*ai_col,
+                hidden_column_ids[ObAiColumnSchemaHelper::AI_STATE_COLUMN],
+                hidden_column_ids[ObAiColumnSchemaHelper::AI_REQUEST_COLUMN],
+                hidden_column_ids[ObAiColumnSchemaHelper::AI_RESULT_SPEC_COLUMN]))) {
+          LOG_WARN("failed to set ai hidden column ids", KR(ret));
+        }
+        if (OB_SUCC(ret) && update_inner_table && OB_NOT_NULL(ai_col->get_ai_column_info())) {
+          ObAiColumnSqlService ai_column_sql_service(*get_schema_service().get_schema_service());
+          if (OB_FAIL(ai_column_sql_service.insert_ai_column(new_table_schema, *ai_col,
+                  *ai_col->get_ai_column_info(), *trans))) {
+            LOG_WARN("failed to insert ai column metadata", KR(ret));
+          }
         }
       }
     }

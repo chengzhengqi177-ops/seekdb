@@ -2275,6 +2275,11 @@ typedef enum ObItemType
   T_DIFF_TABLE = 4918,
   T_MERGE_TABLE = 4919,
   T_FLUSH_PRIVILEGES = 4920,
+  // AI COLUMN DDL
+  T_AI_COLUMN_ATTRIBUTE = 4921,     // AI COLUMN ( expr ) [WITH ( ... )] column attribute
+  T_AI_COLUMN_WITH_OPTIONS = 4922,  // WITH ( ... ) option list container
+  T_AI_COLUMN_WITH_OPTION = 4923,   // single option: name = value
+  T_ALTER_RETRY_AI_COLUMN = 4924,   // ALTER TABLE ... RETRY AI COLUMN col [WHERE ...]
   T_MAX //Attention: add a new type before T_MAX
 } ObItemType;
 

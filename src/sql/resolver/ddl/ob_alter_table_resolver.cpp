@@ -454,6 +454,11 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
             }
             break;
           }
+        case T_ALTER_RETRY_AI_COLUMN: {
+            if (OB_FAIL(resolve_retry_ai_column(*action_node, node.num_child_ > 1))) {
+            }
+            break;
+          }
         case T_ALTER_INDEX_OPTION_EXTENDED: {
             alter_table_stmt->set_alter_table_index();
             if (OB_FAIL(resolve_extended_index_options(*action_node))) {
@@ -3462,6 +3467,115 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
       }
     }
     add_column_cnt_++;
+  }
+  return ret;
+}
+
+// ALTER TABLE tbl RETRY AI COLUMN col [WHERE <predicate>]
+//
+// The predicate text is kept as raw SQL and forwarded to the executor (via ObAlterTableArg);
+// only light checks are done here:
+//   - the alter statement must contain no action other than RETRY AI COLUMN
+//   - the target column must exist and must be an AI column
+//   - the predicate must not reference AI columns (including the target column itself)
+int ObAlterTableResolver::resolve_retry_ai_column(const ParseNode &node, const bool has_other_action)
+{
+  int ret = OB_SUCCESS;
+  ObAlterTableStmt *alter_table_stmt = get_alter_table_stmt();
+  ParseNode *column_node = NULL;
+  ParseNode *where_node = NULL;
+  if (OB_UNLIKELY(T_ALTER_RETRY_AI_COLUMN != node.type_)
+      || OB_UNLIKELY(2 != node.num_child_)
+      || OB_ISNULL(node.children_)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid retry ai column parse node", K(ret), K(node.type_), K(node.num_child_));
+  } else if (has_other_action) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
+    SQL_RESV_LOG(WARN, "retry ai column mixed with other alter actions", K(ret));
+  } else if (OB_ISNULL(alter_table_stmt) || OB_ISNULL(table_schema_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(column_node = node.children_[0])
+             || OB_ISNULL(column_node->str_value_)
+             || column_node->str_len_ <= 0) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid retry ai column name node", K(ret));
+  } else {
+    ObString column_name(static_cast<int32_t>(column_node->str_len_), column_node->str_value_);
+    const ObColumnSchemaV2 *column_schema = table_schema_->get_column_schema(column_name);
+    if (OB_ISNULL(column_schema)) {
+      const ObString &table_name = table_schema_->get_table_name_str();
+      ret = OB_ERR_BAD_FIELD_ERROR;
+      LOG_USER_ERROR(OB_ERR_BAD_FIELD_ERROR, column_name.length(), column_name.ptr(),
+                     table_name.length(), table_name.ptr());
+      SQL_RESV_LOG(WARN, "retry ai column: column not found", K(ret), K(column_name));
+    } else if (!column_schema->is_ai_column()) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
+      SQL_RESV_LOG(WARN, "retry ai column: column is not an ai column", K(ret), K(column_name));
+    } else {
+      ObString where_str;
+      where_node = node.children_[1];
+      if (OB_NOT_NULL(where_node)) {
+        ParseNode *where_expr_node = NULL;
+        if (OB_UNLIKELY(T_WHERE_CLAUSE != where_node->type_)
+            || OB_UNLIKELY(where_node->num_child_ < 1)
+            || OB_ISNULL(where_node->children_)
+            || OB_ISNULL(where_expr_node = where_node->children_[0])) {
+          ret = OB_ERR_UNEXPECTED;
+          SQL_RESV_LOG(WARN, "invalid retry ai column where node", K(ret));
+        } else if (OB_FAIL(check_retry_where_expr(*where_expr_node))) {
+        } else if (OB_ISNULL(where_expr_node->str_value_) || where_expr_node->str_len_ <= 0) {
+          ret = OB_ERR_UNEXPECTED;
+          SQL_RESV_LOG(WARN, "retry ai column where string is empty", K(ret));
+        } else {
+          where_str.assign_ptr(where_expr_node->str_value_,
+                               static_cast<int32_t>(where_expr_node->str_len_));
+        }
+      }
+      if (OB_SUCC(ret)) {
+        ObAlterTableArg &alter_table_arg = alter_table_stmt->get_alter_table_arg();
+        alter_table_arg.is_retry_ai_column_ = true;
+        if (OB_FAIL(ob_write_string(*allocator_, column_name, alter_table_arg.retry_column_name_))) {
+          SQL_RESV_LOG(WARN, "failed to deep copy retry ai column name", K(ret));
+        } else if (!where_str.empty()
+                   && OB_FAIL(ob_write_string(*allocator_, where_str, alter_table_arg.retry_where_str_))) {
+          SQL_RESV_LOG(WARN, "failed to deep copy retry ai column where string", K(ret));
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+// Walk the parse tree of the RETRY ... WHERE predicate and reject references to AI columns.
+// Note: the retry-only pseudo column `status` (unquoted) is left to the executor; quoted
+// `status` denotes the physical column and is treated as an ordinary column here.
+int ObAlterTableResolver::check_retry_where_expr(const ParseNode &node)
+{
+  int ret = OB_SUCCESS;
+  if (T_COLUMN_REF == node.type_
+      && node.num_child_ >= 3
+      && OB_NOT_NULL(node.children_)
+      && OB_NOT_NULL(node.children_[2])
+      && OB_NOT_NULL(node.children_[2]->str_value_)
+      && node.children_[2]->str_len_ > 0) {
+    ObString column_name(static_cast<int32_t>(node.children_[2]->str_len_),
+                         node.children_[2]->str_value_);
+    const ObColumnSchemaV2 *column_schema = NULL;
+    if (OB_NOT_NULL(table_schema_)
+        && OB_NOT_NULL(column_schema = table_schema_->get_column_schema(column_name))
+        && column_schema->is_ai_column()) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "referencing an AI column in the AI COLUMN RETRY predicate");
+      SQL_RESV_LOG(WARN, "retry ai column where references an ai column", K(ret), K(column_name));
+    }
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < node.num_child_; ++i) {
+    if (OB_NOT_NULL(node.children_) && OB_NOT_NULL(node.children_[i])) {
+      if (OB_FAIL(SMART_CALL(check_retry_where_expr(*node.children_[i])))) {
+      }
+    }
   }
   return ret;
 }

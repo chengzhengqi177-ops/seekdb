@@ -30,14 +30,16 @@ namespace schema
 
 ObColumnSchemaV2::ObColumnSchemaV2()
     : ObSchema(),
-    local_session_vars_(get_allocator())
+    local_session_vars_(get_allocator()),
+    ai_column_info_(NULL)
 {
   reset();
 }
 
 ObColumnSchemaV2::ObColumnSchemaV2(ObIAllocator *allocator)
     : ObSchema(allocator),
-    local_session_vars_(allocator)
+    local_session_vars_(allocator),
+    ai_column_info_(NULL)
 {
   reset();
 }
@@ -94,6 +96,14 @@ int ObColumnSchemaV2::assign(const ObColumnSchemaV2 &src_schema)
       }
     }
 
+    if (OB_SUCC(ret)) {
+      ai_column_info_ = NULL;
+      if (NULL != src_schema.ai_column_info_) {
+        if (OB_FAIL(set_ai_column_info(*src_schema.ai_column_info_))) {
+        }
+      }
+    }
+
     if (OB_FAIL(ret)) {
       error_ret_ = ret;
     }
@@ -128,6 +138,9 @@ int64_t ObColumnSchemaV2::get_convert_size() const
     convert_size += extended_type_info_.at(i).length() + 1;
   }
   convert_size += local_session_vars_.get_deep_copy_size();
+  if (NULL != ai_column_info_) {
+    convert_size += ai_column_info_->get_convert_size();
+  }
   return convert_size;
 }
 
@@ -188,6 +201,7 @@ void ObColumnSchemaV2::reset()
   skip_index_attr_.reset();
   lob_chunk_size_ = OB_DEFAULT_LOB_CHUNK_SIZE;
   local_session_vars_.reset();
+  ai_column_info_ = NULL;
   ObSchema::reset();
 }
 
@@ -236,6 +250,15 @@ OB_DEF_SERIALIZE(ObColumnSchemaV2)
                 skip_index_attr_,
                 lob_chunk_size_,
                 local_session_vars_);
+  }
+
+  if (OB_SUCC(ret)) {
+    bool has_ai_column_info = (NULL != ai_column_info_);
+    LST_DO_CODE(OB_UNIS_ENCODE, has_ai_column_info);
+    if (OB_SUCC(ret) && has_ai_column_info) {
+      if (OB_FAIL(ai_column_info_->serialize(buf, buf_len, pos))) {
+      }
+    }
   }
 
   return ret;
@@ -297,6 +320,24 @@ OB_DEF_DESERIALIZE(ObColumnSchemaV2)
                 lob_chunk_size_,
                 local_session_vars_);
   }
+
+  if (OB_SUCC(ret)) {
+    bool has_ai_column_info = false;
+    LST_DO_CODE(OB_UNIS_DECODE, has_ai_column_info);
+    if (OB_SUCC(ret) && has_ai_column_info) {
+      common::ObIAllocator *allocator = get_allocator();
+      void *ptr = NULL;
+      if (OB_ISNULL(allocator)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_ISNULL(ptr = alloc(sizeof(ObAiColumnInfo)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        ai_column_info_ = new (ptr) ObAiColumnInfo(*allocator);
+        if (OB_FAIL(ai_column_info_->deserialize(buf, data_len, pos))) {
+        }
+      }
+    }
+  }
   return ret;
 }
 
@@ -341,6 +382,13 @@ OB_DEF_SERIALIZE_SIZE(ObColumnSchemaV2)
               skip_index_attr_,
               lob_chunk_size_,
               local_session_vars_);
+  {
+    bool has_ai_column_info = (NULL != ai_column_info_);
+    LST_DO_CODE(OB_UNIS_ADD_LEN, has_ai_column_info);
+    if (has_ai_column_info) {
+      len += ai_column_info_->get_serialize_size();
+    }
+  }
   return len;
 }
 
@@ -409,6 +457,7 @@ int64_t ObColumnSchemaV2::to_string(char *buf, const int64_t buf_len) const
     K_(skip_index_attr),
     K_(lob_chunk_size),
     KPC_(column_ref_idxs),
+    KPC_(ai_column_info),
     K(local_session_vars_));
   J_OBJ_END();
   return pos;
@@ -566,6 +615,31 @@ int ObColumnSchemaV2::convert_column_id(const hash::ObHashMap<uint64_t, uint64_t
     } else if (OB_FAIL(column_id_map.get_refactored(old_column_id, new_column_id))) {
     } else {
       set_next_column_id(new_column_id);
+    }
+  }
+  if (OB_SUCC(ret) && NULL != ai_column_info_) {
+    if (OB_FAIL(ai_column_info_->convert_column_id(column_id_map))) {
+    }
+  }
+  return ret;
+}
+
+int ObColumnSchemaV2::set_ai_column_info(const ObAiColumnInfo &ai_column_info)
+{
+  int ret = OB_SUCCESS;
+  if (NULL == ai_column_info_) {
+    common::ObIAllocator *allocator = get_allocator();
+    void *ptr = NULL;
+    if (OB_ISNULL(allocator)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_ISNULL(ptr = allocator->alloc(sizeof(ObAiColumnInfo)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      ai_column_info_ = new (ptr) ObAiColumnInfo(*allocator);
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(ai_column_info_->assign(ai_column_info))) {
     }
   }
   return ret;

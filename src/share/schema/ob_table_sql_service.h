@@ -326,6 +326,7 @@ private:
       ObDMLSqlSplicer &all_table_dml,
       const bool is_history = false);
   int batch_add_table_for_create_table(common::ObISQLClient &sql_client, const ObIArray<ObTableSchema> &tables);
+  int insert_ai_columns_for_create_table(common::ObISQLClient &sql_client, ObIArray<ObTableSchema> &tables);
   int delete_from_all_table(common::ObISQLClient &sql_client,
                             const uint64_t table_id);
   int delete_from_all_table_stat(common::ObISQLClient &sql_client,

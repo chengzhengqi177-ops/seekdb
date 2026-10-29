@@ -24,6 +24,7 @@
 #include "share/schema/ob_schema_struct.h"
 #include "share/schema/ob_schema_utils.h"
 #include "common/rowkey/ob_rowkey_info.h"
+#include "share/schema/ob_ai_column_info.h"
 
 namespace oceanbase
 {
@@ -341,6 +342,19 @@ int assign(const ObColumnSchemaV2 &src_schema);
 
   int convert_column_id(const hash::ObHashMap<uint64_t, uint64_t> &column_id_map);
 
+  /* ai column */
+  inline bool is_ai_column() const { return NULL != ai_column_info_; }
+  inline const ObAiColumnInfo *get_ai_column_info() const { return ai_column_info_; }
+  inline ObAiColumnInfo *get_ai_column_info() { return ai_column_info_; }
+  int set_ai_column_info(const ObAiColumnInfo &ai_column_info);
+  inline void clear_ai_column_info() { ai_column_info_ = NULL; }
+  inline uint64_t get_ai_state_column_id() const
+  { return NULL == ai_column_info_ ? 0 : ai_column_info_->get_state_column_id(); }
+  inline uint64_t get_ai_request_column_id() const
+  { return NULL == ai_column_info_ ? 0 : ai_column_info_->get_request_column_id(); }
+  inline uint64_t get_ai_result_spec_column_id() const
+  { return NULL == ai_column_info_ ? 0 : ai_column_info_->get_result_spec_column_id(); }
+
   int serialize_extended_type_info(char *buf, const int64_t buf_len, int64_t &pos) const;
   int deserialize_extended_type_info(const char *buf, const int64_t data_len, int64_t &pos);
 
@@ -398,6 +412,7 @@ private:
   ObSkipIndexColumnAttr skip_index_attr_;
   int64_t lob_chunk_size_;
   share::ObLocalSessionVar local_session_vars_;
+  ObAiColumnInfo *ai_column_info_;
 };
 
 inline int32_t ObColumnSchemaV2::get_data_length() const

@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
 #include "ob_table_sql_service.h"
+#include "share/schema/ob_ai_column_sql_service.h"
 #include "lib/literals/ob_literals.h"
 #include "share/ob_global_stat_proxy.h"
 #include "share/schema/ob_constraint.h"
@@ -2151,6 +2152,8 @@ int ObTableSqlService::batch_create_table(ObIArray<ObTableSchema> &tables,
     } else if (FALSE_IT(time_guard.click("insert_all_table"))) {
     } else if (OB_FAIL(batch_add_columns_for_create_table(sql_client, tables))) {
     } else if (FALSE_IT(time_guard.click("insert_all_column"))) {
+    } else if (OB_FAIL(insert_ai_columns_for_create_table(sql_client, tables))) {
+    } else if (FALSE_IT(time_guard.click("insert_ai_column"))) {
     } else if (OB_FAIL(batch_add_constraints_for_create_table(sql_client, tables))) {
     } else if (FALSE_IT(time_guard.click("insert_all_cst"))) {
     } else if (OB_FAIL(batch_add_table_part_info(sql_client, tables))) {
@@ -2172,6 +2175,33 @@ int ObTableSqlService::batch_create_table(ObIArray<ObTableSchema> &tables,
             last_table.get_data_table_id(), last_table.get_in_offline_ddl_white_list()))) {
         }
         time_guard.click("update_data_table_schema_version");
+      }
+    }
+  }
+  return ret;
+}
+
+int ObTableSqlService::insert_ai_columns_for_create_table(
+    common::ObISQLClient &sql_client, ObIArray<ObTableSchema> &tables)
+{
+  int ret = OB_SUCCESS;
+  ObAiColumnSqlService ai_column_sql_service(schema_service_);
+  for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); ++i) {
+    ObTableSchema &table = tables.at(i);
+    if (is_inner_table(table.get_table_id())) {
+      // system tables never hold AI columns
+    } else {
+      bool has_ai_column = false;
+      ObTableSchema::const_column_iterator iter = table.column_begin();
+      ObTableSchema::const_column_iterator end = table.column_end();
+      for (; !has_ai_column && iter != end; ++iter) {
+        const ObColumnSchemaV2 *column = *iter;
+        if (OB_NOT_NULL(column) && column->is_ai_column()) {
+          has_ai_column = true;
+        }
+      }
+      if (has_ai_column && OB_FAIL(ai_column_sql_service.insert_ai_columns(table, sql_client))) {
+        LOG_WARN("failed to insert ai columns", KR(ret), K(table.get_table_id()));
       }
     }
   }
