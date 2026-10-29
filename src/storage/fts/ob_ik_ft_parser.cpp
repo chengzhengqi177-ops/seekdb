@@ -258,16 +258,20 @@ int ObIKFTParser::init_dict(const ObFTParserParam &param)
   } else {
     if (OB_FAIL(init_single_dict(main_dict_desc, cache_main_))) {
     } else if (OB_FAIL(init_single_dict(quan_dict_desc, cache_quan_))) {
-    } else if (OB_FAIL(init_single_dict(stopword_dict_desc, cache_stop_))) {
     }
+    // 性能优化：停止词检查已在 get_next_token 中注释掉，dict_stop_ 不再被读取。
+    // 跳过其加载可省去 1/3 的词典加载开销（每范围一次全局缓存加锁 + 多次分配）。
+    // 若将来恢复停用词过滤，请同时恢复下面这行。
+    // } else if (OB_FAIL(init_single_dict(stopword_dict_desc, cache_stop_))) {
   }
 
   if (OB_FAIL(ret)) {
     // already logged.
   } else if (OB_FAIL(build_dict_from_cache(main_dict_desc, cache_main_, dict_main_))) {
   } else if (OB_FAIL(build_dict_from_cache(quan_dict_desc, cache_quan_, dict_quan_))) {
-  } else if (OB_FAIL(build_dict_from_cache(stopword_dict_desc, cache_stop_, dict_stop_))) {
   }
+  // 同上：停止词词典未被使用，跳过构建
+  // } else if (OB_FAIL(build_dict_from_cache(stopword_dict_desc, cache_stop_, dict_stop_))) {
 
   return ret;
 }
