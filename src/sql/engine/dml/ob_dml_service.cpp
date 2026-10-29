@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 #include "config_bridge.h"
 #include "sql/engine/dml/ob_dml_service.h"
+#include "sql/engine/dml/ob_ai_column_dml_handler.h"
 #include "sql/engine/expr/ob_datum_cast.h"
 #include "share/rc/ob_server_runtime.h"
 #include "sql/das/ob_das_insert_op.h"
@@ -2254,6 +2255,30 @@ int ObDMLService::handle_after_row_processing(ObTableModifyOp *op,
     ret = handle_after_processing_single_row(dml_modify_rows);
   } else {
     ret = handle_after_processing_multi_row(dml_modify_rows, op);
+  }
+  // AI column maintenance runs after the foreign key / trigger processing:
+  // it executes nested SQL which must not interfere with the dml row restore.
+  if (OB_SUCC(ret) && !op->get_exec_ctx().get_my_session()->is_inner()) {
+    ObDMLModifyRowsList::iterator ai_iter = dml_modify_rows->begin();
+    for (; OB_SUCC(ret) && ai_iter != dml_modify_rows->end(); ++ai_iter) {
+      ObDMLModifyRowNode &modify_row = *ai_iter;
+      if (OB_ISNULL(modify_row.dml_op_) || OB_ISNULL(modify_row.dml_ctdef_)
+          || OB_ISNULL(modify_row.dml_rtdef_)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        const ObDMLBaseCtDef &row_ctdef = *modify_row.dml_ctdef_;
+        if (OB_NOT_NULL(modify_row.full_row_)
+            && OB_FAIL(modify_row.full_row_->to_expr(row_ctdef.full_row_, modify_row.dml_op_->get_eval_ctx()))) {
+        } else if (OB_NOT_NULL(modify_row.old_row_)
+                   && OB_FAIL(modify_row.old_row_->to_expr(row_ctdef.old_row_, modify_row.dml_op_->get_eval_ctx()))) {
+        } else if (OB_NOT_NULL(modify_row.new_row_)
+                   && OB_FAIL(modify_row.new_row_->to_expr(row_ctdef.new_row_, modify_row.dml_op_->get_eval_ctx()))) {
+        } else if (OB_FAIL(ObAiColumnDMLHandler::handle_row(*modify_row.dml_op_, row_ctdef,
+                                                            *modify_row.dml_rtdef_, modify_row.dml_event_))) {
+          LOG_WARN("failed to handle ai column row", KR(ret), K(modify_row.dml_event_));
+        }
+      }
+    }
   }
   return ret;
 }

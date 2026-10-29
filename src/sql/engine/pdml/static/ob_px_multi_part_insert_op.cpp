@@ -152,13 +152,18 @@ int ObPxMultiPartInsertOp::write_rows(ObExecContext &ctx,
     while (OB_SUCC(ret)) {
       ObChunkDatumStore::StoredRow* stored_row = nullptr;
       clear_evaluated_flag();
+      ObDMLModifyRowNode modify_row(this, &MY_SPEC.ins_ctdef_, &ins_rtdef_,
+                                    ObDmlEventType::DE_INSERTING);
       if (OB_FAIL(try_check_status())) {
       } else if (OB_FAIL(dml_row_iter.get_next_row(child_->get_spec().output_))) {
         if (OB_ITER_END != ret) {
         } else {
           iter_end_ = true;
         }
-      } else if (OB_FAIL(ObDMLService::insert_row(MY_SPEC.ins_ctdef_, ins_rtdef_, tablet_loc, dml_rtctx_, stored_row))) {
+      } else if (OB_FAIL(ObDMLService::insert_row(MY_SPEC.ins_ctdef_, ins_rtdef_, tablet_loc,
+                                                  dml_rtctx_, modify_row.new_row_))) {
+      } else if (need_after_row_process(MY_SPEC.ins_ctdef_)
+                 && OB_FAIL(dml_modify_rows_.push_back(modify_row))) {
       } else if (OB_FAIL(discharge_das_write_buffer())) {
       } else {
         op_monitor_info_.otherstat_3_value_++;

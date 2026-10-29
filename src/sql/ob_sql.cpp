@@ -16,6 +16,10 @@
 
 #define USING_LOG_PREFIX SQL
 #include "config_bridge.h"
+#include "common/mysqlclient/ob_mysql_result.h"
+#include "sql/resolver/dml/ob_dml_stmt.h"
+#include "share/schema/ob_schema_getter_guard.h"
+#include "share/ob_server_struct.h"
 #include "sql/ob_sql.h"
 #include "lib/json/ob_json_print_utils.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
@@ -2019,6 +2023,157 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
   return ret;
 }
 
+
+namespace
+{
+
+struct ObAiColumnRef
+{
+  uint64_t table_id_;
+  uint64_t column_id_;
+};
+
+int collect_ai_column_refs(const ObDMLStmt *dml_stmt, ObIArray<ObAiColumnRef> &refs)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(dml_stmt)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    const ObIArray<ColumnItem> &column_items = dml_stmt->get_column_items();
+    for (int64_t i = 0; OB_SUCC(ret) && i < column_items.count(); ++i) {
+      const ObColumnRefRawExpr *expr = column_items.at(i).expr_;
+      if (OB_ISNULL(expr)) {
+        continue;
+      }
+      bool exists = false;
+      for (int64_t j = 0; !exists && j < refs.count(); ++j) {
+        if (refs.at(j).table_id_ == expr->get_table_id()
+            && refs.at(j).column_id_ == expr->get_column_id()) {
+          exists = true;
+        }
+      }
+      if (!exists) {
+        ObAiColumnRef ref;
+        uint64_t real_table_id = expr->get_table_id();
+        const TableItem *table_item = dml_stmt->get_table_item_by_id(expr->get_table_id());
+        if (OB_NOT_NULL(table_item) && 0 != table_item->ref_id_) {
+          real_table_id = table_item->ref_id_;
+        }
+        ref.table_id_ = real_table_id;
+        ref.column_id_ = expr->get_column_id();
+        if (OB_FAIL(refs.push_back(ref))) {
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      const ObIArray<ObQueryRefRawExpr*> &subqueries = dml_stmt->get_subquery_exprs();
+      for (int64_t i = 0; OB_SUCC(ret) && i < subqueries.count(); ++i) {
+        const ObQueryRefRawExpr *query_ref = subqueries.at(i);
+        if (OB_ISNULL(query_ref)) {
+          continue;
+        }
+        const ObSelectStmt *sub_stmt = query_ref->get_ref_stmt();
+        if (OB_NOT_NULL(sub_stmt) && OB_FAIL(collect_ai_column_refs(sub_stmt, refs))) {
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int check_ai_column_strict_read(share::schema::ObSchemaGetterGuard *schema_guard,
+                                ObSQLSessionInfo &session,
+                                ObStmt *stmt)
+{
+  int ret = OB_SUCCESS;
+  ObObj strict_value;
+  int64_t strict_read = 0;
+  if (OB_ISNULL(schema_guard) || OB_ISNULL(stmt)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(session.get_sys_variable(share::SYS_VAR_AI_COLUMN_STRICT_READ, strict_value))) {
+    if (OB_ERR_SYS_VARIABLE_UNKNOWN == ret || OB_SCHEMA_EAGAIN == ret) {
+      ret = OB_SUCCESS;
+    }
+  } else {
+    strict_read = strict_value.get_int();
+  }
+  if (OB_FAIL(ret) || 0 == strict_read || !ObStmt::is_dml_stmt(stmt->get_stmt_type())) {
+  } else {
+    const ObDMLStmt *dml_stmt = static_cast<const ObDMLStmt *>(stmt);
+    ObSEArray<ObAiColumnRef, 8> refs;
+    if (OB_FAIL(collect_ai_column_refs(dml_stmt, refs))) {
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < refs.count(); ++i) {
+      ObArenaAllocator allocator(ObModIds::OB_SQL_PARSER);
+      ObString state_col_name;
+      ObString table_name;
+      ObString database_name;
+      ObSqlString meta_sql;
+      {
+        SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+          sqlclient::ObMySQLResult *row = NULL;
+          if (OB_ISNULL(GCTX.sql_proxy_)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (OB_FAIL(meta_sql.append_fmt(
+                         "SELECT c.column_name AS state_col, t.table_name AS tbl, "
+                         "d.database_name AS db FROM oceanbase.__all_ai_column a "
+                         "JOIN oceanbase.__all_table t ON t.table_id = a.table_id "
+                         "JOIN oceanbase.__all_database d ON d.database_id = t.database_id "
+                         "JOIN oceanbase.__all_column c ON c.table_id = a.table_id "
+                         "AND c.column_id = a.state_column_id "
+                         "WHERE a.table_id = %lu AND a.column_id = %lu",
+                         refs.at(i).table_id_, refs.at(i).column_id_))) {
+          } else if (OB_FAIL(GCTX.sql_proxy_->read(res, meta_sql.ptr()))) {
+          } else if (OB_ISNULL(row = res.get_result())) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (OB_SUCC(row->next())) {
+            ObString tmp;
+            if (OB_FAIL(row->get_varchar("state_col", tmp))) {
+            } else if (OB_FAIL(ob_write_string(allocator, tmp, state_col_name))) {
+            } else if (OB_FAIL(row->get_varchar("tbl", tmp))) {
+            } else if (OB_FAIL(ob_write_string(allocator, tmp, table_name))) {
+            } else if (OB_FAIL(row->get_varchar("db", tmp))) {
+            } else if (OB_FAIL(ob_write_string(allocator, tmp, database_name))) {
+            }
+          } else if (OB_ITER_END == ret) {
+            ret = OB_SUCCESS;
+          }
+        }
+      }
+      if (OB_FAIL(ret) || state_col_name.empty()) {
+        ret = OB_SUCC(ret) ? OB_SUCCESS : ret;
+      } else {
+        ObSqlString sql;
+        if (OB_FAIL(sql.append_fmt(
+                "SELECT 1 FROM `%.*s`.`%.*s` WHERE `%.*s` IS NULL OR `%.*s` <> 1 LIMIT 1",
+                database_name.length(), database_name.ptr(),
+                table_name.length(), table_name.ptr(),
+                state_col_name.length(), state_col_name.ptr(),
+                state_col_name.length(), state_col_name.ptr()))) {
+        } else {
+          SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+            sqlclient::ObMySQLResult *row = NULL;
+            if (OB_FAIL(GCTX.sql_proxy_->read(res, sql.ptr()))) {
+            } else if (OB_ISNULL(row = res.get_result())) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (OB_SUCC(row->next())) {
+              ret = OB_ERR_AI_COLUMN_NOT_READY;
+              LOG_USER_ERROR(OB_ERR_AI_COLUMN_NOT_READY,
+                             static_cast<uint64_t>(refs.at(i).table_id_),
+                             static_cast<uint64_t>(refs.at(i).column_id_));
+            } else if (OB_ITER_END == ret) {
+              ret = OB_SUCCESS;
+            }
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+} // anonymous namespace
+
 int ObSql::generate_stmt(ParseResult &parse_result,
                          ObPlanCacheCtx *pc_ctx,
                          ObSqlCtx &context,
@@ -2141,6 +2296,10 @@ int ObSql::generate_stmt(ParseResult &parse_result,
         ret = resolver.resolve(ObResolver::IS_NOT_PREPARED_STMT, tmp_node, stmt);
       } else {
         ret = resolver.resolve(ObResolver::IS_NOT_PREPARED_STMT, *parse_result.result_tree_->children_[0], stmt);
+      }
+      if (OB_SUCC(ret) && !context.is_prepare_stage_ && NULL != stmt
+          && NULL != resolver_ctx.session_info_ && !resolver_ctx.session_info_->is_inner()) {
+        ret = check_ai_column_strict_read(context.schema_guard_, *resolver_ctx.session_info_, stmt);
       }
 
       // set const param constraint after resolving

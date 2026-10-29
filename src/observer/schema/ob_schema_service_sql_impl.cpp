@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
 #include "config_bridge.h"
+#include "share/ob_server_struct.h"
 #include "ob_schema_service_sql_impl.h"
 #include "share/ob_global_stat_proxy.h"
 #include "share/ob_share_util.h"
@@ -1318,6 +1319,219 @@ int ObSchemaServiceSQLImpl::get_sys_variable_schema(
   return ret;
 }
 
+
+namespace
+{
+
+int parse_ai_dependency_ids(const common::ObString &deps, common::ObIArray<uint64_t> &ids)
+{
+  int ret = OB_SUCCESS;
+  const char *p = deps.ptr();
+  const int64_t len = deps.length();
+  int64_t pos = 0;
+  while (OB_SUCC(ret) && pos < len) {
+    while (pos < len && (',' == p[pos] || ' ' == p[pos])) {
+      ++pos;
+    }
+    if (pos >= len) {
+      break;
+    }
+    uint64_t id = 0;
+    bool has_digit = false;
+    while (pos < len && p[pos] >= '0' && p[pos] <= '9') {
+      id = id * 10 + static_cast<uint64_t>(p[pos] - '0');
+      has_digit = true;
+      ++pos;
+    }
+    if (has_digit && OB_FAIL(ids.push_back(id))) {
+      break;
+    }
+    while (pos < len && ',' != p[pos]) {
+      ++pos;
+    }
+  }
+  return ret;
+}
+
+int read_ai_int_field(sqlclient::ObMySQLResult &row, const char *name, int64_t &value)
+{
+  int ret = OB_SUCCESS;
+  value = 0;
+  ObString str;
+  if (OB_SUCC(row.get_varchar(name, str))) {
+    if (!str.empty()) {
+      char buf[64];
+      const int64_t len = MIN(static_cast<int64_t>(sizeof(buf) - 1), static_cast<int64_t>(str.length()));
+      MEMCPY(buf, str.ptr(), len);
+      buf[len] = '\0';
+      value = strtoll(buf, NULL, 10);
+    }
+  } else {
+    ret = OB_SUCCESS;
+    if (OB_FAIL(row.get_int(name, value))) {
+    }
+  }
+  return ret;
+}
+
+int read_ai_uint_field(sqlclient::ObMySQLResult &row, const char *name, uint64_t &value)
+{
+  int ret = OB_SUCCESS;
+  int64_t tmp = 0;
+  if (OB_FAIL(read_ai_int_field(row, name, tmp))) {
+  } else {
+    value = static_cast<uint64_t>(tmp);
+  }
+  return ret;
+}
+
+int read_optional_varchar(sqlclient::ObMySQLResult &row, const char *name, ObString &out)
+{
+  int ret = OB_SUCCESS;
+  out.reset();
+  if (OB_FAIL(row.get_varchar(name, out))) {
+    if (OB_ERR_NULL_VALUE == ret) {
+      ret = OB_SUCCESS;
+      out.reset();
+    }
+  }
+  return ret;
+}
+
+int attach_ai_column_info(sqlclient::ObMySQLResult &row, ObTableSchema &table)
+{
+  int ret = OB_SUCCESS;
+  uint64_t column_id = 0;
+  ObString expr;
+  ObString normalized_expr;
+  ObString dependencies;
+  ObString model_name;
+  int64_t sync_mode = 0;
+  int64_t max_retries = 0;
+  int64_t definition_version = 1;
+  int64_t ai_function = 0;
+  int64_t result_type = 0;
+  uint64_t state_column_id = 0;
+  uint64_t request_column_id = 0;
+  uint64_t result_spec_column_id = 0;
+  ObColumnSchemaV2 *column = NULL;
+  if (OB_FAIL(read_ai_uint_field(row, "column_id", column_id))) {
+  } else if (OB_ISNULL(column = table.get_column_schema(column_id))) {
+    ret = OB_ENTRY_NOT_EXIST;
+  } else {
+    ObArenaAllocator info_allocator(ObModIds::OB_MODULE_PAGE_ALLOCATOR);
+    ObAiColumnInfo info(info_allocator);
+    ObSEArray<uint64_t, 4> dependency_ids;
+    if (OB_FAIL(read_ai_int_field(row, "sync_mode", sync_mode))) {
+    } else if (OB_FAIL(read_ai_int_field(row, "max_retries", max_retries))) {
+    } else if (OB_FAIL(read_ai_int_field(row, "definition_version", definition_version))) {
+    } else if (OB_FAIL(read_ai_int_field(row, "ai_function", ai_function))) {
+    } else if (OB_FAIL(read_ai_int_field(row, "result_type", result_type))) {
+    } else if (OB_FAIL(read_ai_uint_field(row, "state_column_id", state_column_id))) {
+    } else if (OB_FAIL(read_ai_uint_field(row, "request_column_id", request_column_id))) {
+    } else if (OB_FAIL(read_ai_uint_field(row, "result_spec_column_id", result_spec_column_id))) {
+    } else if (OB_FAIL(read_optional_varchar(row, "expr", expr))) {
+    } else if (OB_FAIL(read_optional_varchar(row, "normalized_expr", normalized_expr))) {
+    } else if (OB_FAIL(read_optional_varchar(row, "dependencies", dependencies))) {
+    } else if (OB_FAIL(read_optional_varchar(row, "model_name", model_name))) {
+    } else if (OB_FAIL(parse_ai_dependency_ids(dependencies, dependency_ids))) {
+    } else {
+      info.set_sync_mode(sync_mode);
+      info.set_max_retries(max_retries);
+      info.set_definition_version(definition_version);
+      info.set_ai_function(ai_function);
+      info.set_result_type(result_type);
+      info.set_state_column_id(state_column_id);
+      info.set_request_column_id(request_column_id);
+      info.set_result_spec_column_id(result_spec_column_id);
+      if (OB_FAIL(info.set_expr_sql(expr))) {
+      } else if (OB_FAIL(info.set_normalized_expr(normalized_expr))) {
+      } else if (OB_FAIL(info.set_model_name(model_name))) {
+      } else if (OB_FAIL(info.set_dependency_column_ids(dependency_ids))) {
+      } else if (OB_FAIL(column->set_ai_column_info(info))) {
+      }
+    }
+  }
+  return ret;
+}
+
+int merge_ai_column_info_for_table(common::ObISQLClient &sql_client, ObTableSchema &table)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(sql_client);
+  common::ObMySQLProxy *proxy = GCTX.sql_proxy_;
+  ObSqlString sql;
+  SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+    sqlclient::ObMySQLResult *result = NULL;
+    if (OB_FAIL(sql.append_fmt(
+            "SELECT column_id, sync_mode, max_retries, state_column_id, request_column_id, "
+            "result_spec_column_id, expr, normalized_expr, dependencies, definition_version, "
+            "ai_function, model_name, result_type FROM oceanbase.__all_ai_column "
+            "WHERE table_id = %lu", table.get_table_id()))) {
+    } else if (OB_ISNULL(proxy)) {
+      ret = OB_SUCCESS;
+    } else if (OB_FAIL(proxy->read(res, sql.ptr()))) {
+    } else if (OB_ISNULL(result = res.get_result())) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      while (OB_SUCC(ret) && OB_SUCC(result->next())) {
+        const int tmp_ret = attach_ai_column_info(*result, table);
+        if (OB_SUCCESS != tmp_ret && OB_ENTRY_NOT_EXIST != tmp_ret) {
+          ret = tmp_ret;
+        }
+      }
+      if (OB_ITER_END == ret) {
+        ret = OB_SUCCESS;
+      }
+    }
+  }
+  return ret;
+}
+
+int merge_ai_column_info_for_tables(common::ObISQLClient &sql_client,
+                                    ObArray<ObTableSchema *> &tables)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(sql_client);
+  common::ObMySQLProxy *proxy = GCTX.sql_proxy_;
+  ObSqlString sql;
+  ObSEArray<uint64_t, 8> table_ids;
+  SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+    sqlclient::ObMySQLResult *result = NULL;
+    if (OB_FAIL(sql.append_fmt("SELECT DISTINCT table_id FROM oceanbase.__all_ai_column"))) {
+    } else if (OB_ISNULL(proxy)) {
+      ret = OB_SUCCESS;
+    } else if (OB_FAIL(proxy->read(res, sql.ptr()))) {
+    } else if (OB_ISNULL(result = res.get_result())) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      while (OB_SUCC(ret) && OB_SUCC(result->next())) {
+        uint64_t table_id = 0;
+        if (OB_FAIL(read_ai_uint_field(*result, "table_id", table_id))) {
+        } else if (OB_FAIL(table_ids.push_back(table_id))) {
+        }
+      }
+      if (OB_ITER_END == ret) {
+        ret = OB_SUCCESS;
+      }
+    }
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < table_ids.count(); ++i) {
+    ObTableSchema *table = NULL;
+    for (int64_t j = 0; NULL == table && j < tables.count(); ++j) {
+      if (OB_NOT_NULL(tables.at(j)) && tables.at(j)->get_table_id() == table_ids.at(i)) {
+        table = tables.at(j);
+      }
+    }
+    if (OB_NOT_NULL(table) && OB_FAIL(merge_ai_column_info_for_table(sql_client, *table))) {
+      LOG_WARN("failed to merge ai column info", KR(ret), K(table_ids.at(i)));
+    }
+  }
+  return ret;
+}
+
+} // anonymous namespace
+
 int ObSchemaServiceSQLImpl::fetch_all_column_info(
     const ObRefreshSchemaStatus &schema_status,
     const int64_t schema_version,
@@ -1368,6 +1582,7 @@ int ObSchemaServiceSQLImpl::fetch_all_column_info(
       } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
         ret = OB_ERR_UNEXPECTED;
       } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_column_schema(check_deleted, *result, table_schema_array))) {
+      } else if (OB_FAIL(merge_ai_column_info_for_tables(sql_client, table_schema_array))) {
       }
     }
   }
@@ -4166,6 +4381,7 @@ int ObSchemaServiceSQLImpl::fetch_column_info(const ObRefreshSchemaStatus &schem
       } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
         ret = OB_ERR_UNEXPECTED;
       } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_column_schema(check_deleted, *result, table_schema))) {
+      } else if (OB_NOT_NULL(table_schema) && OB_FAIL(merge_ai_column_info_for_table(sql_client, *table_schema))) {
       }
     }
   }

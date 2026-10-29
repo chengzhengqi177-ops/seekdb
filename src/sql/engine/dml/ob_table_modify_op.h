@@ -238,7 +238,18 @@ public:
   bool has_before_row_trigger(const ObDMLBaseCtDef &dml_ctdef) { return dml_ctdef.is_primary_index_ && dml_ctdef.trig_ctdef_.all_tm_points_.has_before_row(); }
   bool has_after_row_trigger(const ObDMLBaseCtDef &dml_ctdef) { return dml_ctdef.is_primary_index_ && dml_ctdef.trig_ctdef_.all_tm_points_.has_after_row(); }
   bool need_foreign_key_check(const ObDMLBaseCtDef &dml_ctdef) { return dml_ctdef.is_primary_index_ && dml_ctdef.fk_args_.count() > 0; }
-  bool need_after_row_process(const ObDMLBaseCtDef &dml_ctdef) { return need_foreign_key_check(dml_ctdef) || has_after_row_trigger(dml_ctdef); }
+  bool need_after_row_process(const ObDMLBaseCtDef &dml_ctdef)
+  {
+    int ret = OB_SUCCESS;
+    if (!ai_after_row_inited_) {
+      ai_after_row_inited_ = true;
+      ret = check_ai_column_after_row(dml_ctdef.das_base_ctdef_.index_tid_, ai_after_row_);
+      LOG_ERROR("check ai after row", K(ret), K(ai_after_row_),
+               K(dml_ctdef.das_base_ctdef_.table_id_), K(dml_ctdef.das_base_ctdef_.index_tid_));
+    }
+    return need_foreign_key_check(dml_ctdef) || has_after_row_trigger(dml_ctdef) || ai_after_row_;
+  }
+  int check_ai_column_after_row(const uint64_t table_id, bool &need);
   void set_execute_single_row() { execute_single_row_ = true; }
   void unset_execute_single_row() { execute_single_row_ = false; }
   bool get_execute_single_row() const { return execute_single_row_; }
@@ -311,6 +322,8 @@ public:
   bool execute_single_row_;
   ObSEArray<ObExpr *, 4> trigger_clear_exprs_;
   ObDMLModifyRowsList dml_modify_rows_;
+  bool ai_after_row_inited_;
+  bool ai_after_row_;
   ObSEArray<ObForeignKeyChecker *, 4> fk_checkers_;
   ObChunkDatumStore::ShadowStoredRow last_store_row_;
 private:

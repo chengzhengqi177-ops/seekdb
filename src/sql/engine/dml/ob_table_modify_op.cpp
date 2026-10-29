@@ -17,6 +17,10 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "ob_table_modify_op.h"
+#include "share/ob_server_struct.h"
+#include "share/schema/ob_schema_getter_guard.h"
+#include "share/schema/ob_table_schema.h"
+#include "share/schema/ob_column_schema.h"
 #include "share/ob_autoincrement_service.h"
 #include "query/session/ob_inner_sql_connection_access.h"
 #include "sql/engine/ob_physical_plan.h"
@@ -622,6 +626,8 @@ ObTableModifyOp::ObTableModifyOp(ObExecContext &ctx,
     dml_rtctx_(eval_ctx_, ctx, *this),
     execute_single_row_(false),
     dml_modify_rows_(ctx.get_allocator()),
+    ai_after_row_inited_(false),
+    ai_after_row_(false),
     last_store_row_(),
     saved_session_(NULL)
 {
@@ -1156,5 +1162,27 @@ int ObTableModifyOp::perform_batch_fk_check()
   }
   return ret;
 }
+int ObTableModifyOp::check_ai_column_after_row(const uint64_t table_id, bool &need)
+{
+  int ret = OB_SUCCESS;
+  need = false;
+  ObSchemaGetterGuard schema_guard;
+  const ObTableSchema *table = NULL;
+  if (OB_ISNULL(GCTX.schema_service_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(GCTX.schema_service_->get_runtime_schema_guard(schema_guard))) {
+  } else if (OB_FAIL(schema_guard.get_table_schema(table_id, table))) {
+  } else if (OB_NOT_NULL(table)) {
+    for (int64_t i = 0; OB_SUCC(ret) && !need && i < table->get_column_count(); ++i) {
+      const ObColumnSchemaV2 *column = table->get_column_schema_by_idx(i);
+      if (OB_NOT_NULL(column) && column->is_ai_column()) {
+        need = true;
+      }
+    }
+  }
+  LOG_WARN("check ai column after row", KR(ret), K(table_id), K(need), KP(table));
+  return ret;
+}
+
 }  // namespace sql
 }  // namespace oceanbase

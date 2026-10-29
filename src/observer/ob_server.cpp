@@ -35,6 +35,7 @@
 #include "observer/ob_req_time_service.h"
 #include "observer/omt/ob_ai_service.h"
 #include "observer/ai_service/ob_ai_service_executor.h"
+#include "observer/ai_service/ob_ai_column_task_worker.h"
 #include "observer/dbms_scheduler/ob_dbms_sched_service.h"
 #include "storage/lob/ob_lob_manager.h"
 #include "storage/compaction/ob_freeze_info_mgr.h"
@@ -844,6 +845,8 @@ int ObServer::init(const ObServerOptions &opts, const ObPLogWriterCfg &log_cfg)
       LOG_ERROR("init server runtime failed", KR(ret));
     } else if (OB_FAIL(init_ctas_clean_up_task())) {
       LOG_ERROR("init ctas clean up task failed", KR(ret));
+    } else if (OB_FAIL(ObAiColumnTaskWorker::get_instance().init(sql_proxy_))) {
+      LOG_ERROR("init ai column task worker failed", KR(ret));
     } else if (OB_FAIL(init_ddl_heart_beat_task_container())) {
       LOG_ERROR("init ddl heart beat task container failed", KR(ret));
     } else if (OB_FAIL(init_redef_heart_beat_task())) {
@@ -981,7 +984,8 @@ void ObServer::destroy()
     FLOG_INFO("sql memory manager timer destroyed");
 
     FLOG_INFO("begin to destroy ctas clean up timer");
-    ctas_clean_up_timer_.destroy();
+    ObAiColumnTaskWorker::get_instance().destroy();
+  ctas_clean_up_timer_.destroy();
     FLOG_INFO("ctas clean up timer destroyed");
 
     FLOG_INFO("begin to destroy local management service");

@@ -4097,6 +4097,22 @@ int ObDMLResolver::resolve_base_or_alias_table_item_normal(const uint64_t databa
       }
     }
 
+    if (OB_SUCC(ret) && OB_NOT_NULL(tschema) && !tschema->is_index_table()
+        && OB_NOT_NULL(params_.query_ctx_)) {
+      bool has_ai_column = false;
+      for (int64_t ai_idx = 0; !has_ai_column && ai_idx < tschema->get_column_count(); ++ai_idx) {
+        const ObColumnSchemaV2 *ai_col = tschema->get_column_schema_by_idx(ai_idx);
+        if (OB_NOT_NULL(ai_col) && ai_col->is_ai_column()) {
+          has_ai_column = true;
+        }
+      }
+      if (has_ai_column) {
+        // DML on a table with AI columns executes inner SQL (task maintenance),
+        // the plan must be marked as having nested sql.
+        params_.query_ctx_->set_has_nested_sql(true);
+      }
+    }
+
     if (OB_SUCC(ret)) {
       if (session_info_->get_ddl_info().is_ddl()) {
         if (!tschema->is_storage_local_index_table()) {
