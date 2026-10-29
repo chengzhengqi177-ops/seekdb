@@ -244,8 +244,10 @@ public:
     if (!ai_after_row_inited_) {
       ai_after_row_inited_ = true;
       ret = check_ai_column_after_row(dml_ctdef.das_base_ctdef_.index_tid_, ai_after_row_);
-      LOG_ERROR("check ai after row", K(ret), K(ai_after_row_),
-               K(dml_ctdef.das_base_ctdef_.table_id_), K(dml_ctdef.das_base_ctdef_.index_tid_));
+      if (OB_FAIL(ret)) {
+        LOG_WARN("failed to check ai column after row", KR(ret), K(ai_after_row_),
+                 K(dml_ctdef.das_base_ctdef_.index_tid_));
+      }
     }
     return need_foreign_key_check(dml_ctdef) || has_after_row_trigger(dml_ctdef) || ai_after_row_;
   }

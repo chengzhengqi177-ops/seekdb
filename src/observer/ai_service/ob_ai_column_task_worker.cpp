@@ -272,7 +272,6 @@ int ObAiColumnTaskWorker::mark_row_failed_(const TaskInfo &task, const bool drop
   ObSqlString delete_sql;
   ObMySQLTransaction trans;
   int64_t affected_rows = 0;
-  LOG_ERROR("ai mark failed begin", K(task.table_id_), K(task.column_id_));
   if (OB_FAIL(load_column_meta_(task, meta))) {
   } else if (OB_ISNULL(GCTX.schema_service_)) {
     ret = OB_ERR_UNEXPECTED;
@@ -323,7 +322,6 @@ int ObAiColumnTaskWorker::mark_row_failed_(const TaskInfo &task, const bool drop
       }
     }
   }
-  LOG_ERROR("ai mark failed end", KR(ret));
   return ret;
 }
 
@@ -364,8 +362,17 @@ int ObAiColumnTaskWorker::process_group_(common::ObIArray<TaskInfo> &group)
                                                       group_allocator, prompt))) {
       LOG_ERROR("ai task source row missing", K(tmp_ret), K(task.table_id_));
       drop = true;
-    } else if (OB_SUCCESS != (tmp_ret = call_ai_(group_allocator, task, prompt, result))) {
-      LOG_ERROR("ai task model call failed", K(tmp_ret), K(task.table_id_), K(task.column_id_));
+    } else {
+      // bound the endpoint call in the background worker so that a dead or
+      // hanging endpoint cannot block the task scheduler
+      const int64_t saved_timeout_ts = THIS_WORKER.get_timeout_ts();
+      THIS_WORKER.set_timeout_ts(ObTimeUtility::current_time() + 3 * 1000 * 1000);
+      const int call_ret = call_ai_(group_allocator, task, prompt, result);
+      THIS_WORKER.set_timeout_ts(saved_timeout_ts);
+      if (OB_SUCCESS != call_ret) {
+        tmp_ret = call_ret;
+        LOG_ERROR("ai task model call failed", K(tmp_ret), K(task.table_id_), K(task.column_id_));
+      }
     }
     if (OB_SUCC(ret)) {
       if (drop) {
@@ -378,7 +385,6 @@ int ObAiColumnTaskWorker::process_group_(common::ObIArray<TaskInfo> &group)
       }
     }
   }
-  LOG_ERROR("ai group processed", K(ret), K(group.count()), K(group_ok), K(results.count()));
   if (OB_SUCC(ret) && group_ok && !group.empty()) {
     if (OB_FAIL(publish_group_(group, results, metas))) {
       LOG_ERROR("failed to publish ai task group", KR(ret));
@@ -473,7 +479,6 @@ int ObAiColumnTaskWorker::publish_group_(common::ObIArray<TaskInfo> &group,
             ret = end_ret;
           }
         }
-        LOG_ERROR("ai publish done", K(ret), K(all_affected), K(group.count()));
         if (OB_SUCC(ret) && !all_affected) {
           // stale group: remove the outdated tasks, keep the newer results
           for (int64_t i = 0; OB_SUCC(ret) && i < group.count(); ++i) {
@@ -521,12 +526,11 @@ int ObAiColumnTaskWorker::load_tasks_(common::ObIAllocator &allocator,
       } else if (OB_FAIL(tasks.push_back(task))) {
       }
       if (OB_FAIL(ret)) {
-        LOG_ERROR("ai task row parse failed", KR(ret), K(parse_row_no), K(task.table_id_));
+        LOG_WARN("ai task row parse failed", KR(ret), K(parse_row_no), K(task.table_id_));
       }
     }
     if (OB_ITER_END == ret) {
       ret = OB_SUCCESS;
-    } else {
     }
   }
   return ret;
@@ -625,6 +629,10 @@ int ObAiColumnTaskWorker::call_ai_(common::ObIAllocator &allocator,
   ObJsonObject *response = nullptr;
   ObIJsonBase *result_base = nullptr;
   ObAIFuncClient client;
+  // the background worker must never block on a dead endpoint: use a short
+  // per-attempt timeout and let the task-level retry policy handle failures
+  client.set_timeout_sec(2);
+  client.set_max_retry_times(0);
   result.reset();
   if (OB_ISNULL(resolver)) {
     ret = OB_ERR_UNEXPECTED;

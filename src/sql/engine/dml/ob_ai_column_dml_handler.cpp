@@ -46,19 +46,6 @@ namespace
 
 std::atomic<int64_t> g_ai_task_counter(0);
 
-int ai_debug_mode()
-{
-  int mode = 0;
-  FILE *fp = fopen("/tmp/ai_mode", "r");
-  if (NULL != fp) {
-    if (1 != fscanf(fp, "%d", &mode)) {
-      mode = 0;
-    }
-    fclose(fp);
-  }
-  return mode;
-}
-
 const char *AI_TASK_TABLE = "oceanbase.__all_ai_column_task";
 
 int find_column_index(const ObDMLBaseCtDef &ctdef,
@@ -302,7 +289,6 @@ int ObAiColumnDMLHandler::handle_row(ObTableModifyOp &op,
 {
   int ret = OB_SUCCESS;
   int step = 0;
-  LOG_ERROR("ai column handler enter", K(dml_event));
   UNUSED(dml_rtdef);
   ObExecContext &exec_ctx = op.get_exec_ctx();
   ObSQLSessionInfo *session = exec_ctx.get_my_session();
@@ -486,15 +472,10 @@ int ObAiColumnDMLHandler::handle_row(ObTableModifyOp &op,
             if (OB_FAIL(op.begin_nested_session(true))) {
             } else {
               step = 11;
-              const int debug_mode = ai_debug_mode();
-              LOG_ERROR("ai debug mode", K(debug_mode));
-              int tmp_ret = OB_SUCCESS;
-              if (2 != debug_mode) {
-                tmp_ret = op.execute_write(update_sql.ptr());
-                if (OB_SUCCESS != tmp_ret) {
-                  LOG_ERROR("failed to invalidate ai column", K(tmp_ret), K(update_sql));
-                  ret = tmp_ret;
-                }
+              int tmp_ret = op.execute_write(update_sql.ptr());
+              if (OB_SUCCESS != tmp_ret) {
+                LOG_WARN("failed to invalidate ai column", K(tmp_ret), K(update_sql));
+                ret = tmp_ret;
               }
               if (OB_SUCC(ret) && rowkey_changed && old_predicate.length() > 0) {
                 ObSqlString del_sql;
@@ -506,10 +487,6 @@ int ObAiColumnDMLHandler::handle_row(ObTableModifyOp &op,
                 }
               }
               for (int64_t i = 0; OB_SUCC(ret) && i < invalidated_columns.count(); ++i) {
-                if (1 == ai_debug_mode()) {
-                  LOG_ERROR("skip ai task sql by debug mode");
-                  break;
-                }
                 const ObColumnSchemaV2 *column = invalidated_columns.at(i);
                 const ObAiColumnInfo *info = column->get_ai_column_info();
                 ObString prompt_expr;
@@ -567,7 +544,6 @@ int ObAiColumnDMLHandler::handle_row(ObTableModifyOp &op,
       UNUSED(allocator);
     }
   }
-  LOG_ERROR("ai column handler done", K(ret), K(step));
   if (OB_FAIL(ret)) {
     LOG_WARN("ai column handler failed", KR(ret), K(step), K(table_id), K(is_insert), K(is_update));
   }

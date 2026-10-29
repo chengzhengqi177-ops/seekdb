@@ -1031,8 +1031,6 @@ int ObAlterTableExecutor::execute_retry_ai_column(ObExecContext &ctx,
     if (OB_SUCC(ret) && (OB_FAIL(rk_expr.append(")")))) {
     }
   }
-  LOG_ERROR("ai retry debug", K(ret), K(table_id), K(column_id), K(state_col_name),
-            K(arg.retry_where_str_), K(mapped_where.string()), K(rk_expr.string()));
   // 4. invalidate the selected rows and recreate the tasks in one transaction
   if (OB_FAIL(ret)) {
   } else {
