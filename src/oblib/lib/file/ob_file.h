@@ -415,8 +415,8 @@ private:
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-// This legacy appender requires libaio. The local device has its own I/O path.
-#if !defined(__APPLE__) && !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+// libaio is Linux-specific, not available on macOS or Windows
+#if !defined(__APPLE__) && !defined(_WIN32)
 #define __USE_AIO_FILE
 #endif
 #ifdef __USE_AIO_FILE

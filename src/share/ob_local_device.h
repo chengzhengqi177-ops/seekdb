@@ -17,9 +17,7 @@
 #ifndef SRC_SHARE_OB_LOCAL_DEVICE_H_
 #define SRC_SHARE_OB_LOCAL_DEVICE_H_
 
-#if defined(__EMSCRIPTEN__)
-#include "share/wasm_aio.h"
-#elif defined(__linux__) && !defined(__ANDROID__)
+#if defined(__linux__) && !defined(__ANDROID__)
 #include <libaio.h>
 #elif defined(__APPLE__) || defined(_WIN32) || defined(__ANDROID__)
 #ifndef OB_LIBAIO_STUB_DEFINED
@@ -156,7 +154,8 @@ public:
     const int64_t offset,
     const int64_t size,
     void *buf,
-    int64_t &read_size) override;
+    int64_t &read_size,
+    common::ObIODPreadChecker *checker = nullptr) override;
   virtual int pwrite(
     const common::ObIOFd &fd,
     const int64_t offset,
@@ -221,7 +220,7 @@ public:
   virtual int check_write_limited() const override;
 
 public:
-  static const int64_t RESERVED_BLOCK_INDEX = 1; // block zero holds the immutable file header
+  static const int64_t RESERVED_BLOCK_INDEX = 2; // the first 2 blocks is used for super block
 
 private:
   int get_data_disk_used_percentage_(

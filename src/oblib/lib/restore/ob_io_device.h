@@ -22,18 +22,27 @@
 #include "lib/container/ob_iarray.h"
 #include "lib/container/ob_fixed_array.h"
 #include "lib/utility/ob_print_utils.h"
-#include "lib/utility/ob_platform_utils.h"
 
 namespace oceanbase
 {
 namespace common
 {
 class ObIODevice;
-// A descriptor represents a normal file or a data block.
+/**
+ * ObIOFd may represent super block, normal file or block id.
+ *
+ * Super block is maintained in ObIODevice, it can't be directly open or alloc from outside.
+ * But it can be read/write directly after ObIODevice ready.
+ * When the value of first_id_ and second_id_ are both 0, it represents super block.
+ * When the value of first_id_ equals NORMAL_FILE_ID, it represents a normal file.
+ * Otherwise, it represents a block.
+ */
 struct ObIOFd
 {
   ObIOFd(ObIODevice *device_handle = nullptr, const int64_t first_id = -1,
       const int64_t second_id = -1, const int64_t third_id = -1);
+  bool is_super_block() const { return 0 == first_id_ && 0 == second_id_; }
+  bool is_tiered_super_block() const { return 0 == first_id_ && 2 == second_id_; }
   bool is_normal_file() const { return NORMAL_FILE_ID == first_id_ && second_id_ > 0; }
   bool is_block_file() const { return first_id_ != NORMAL_FILE_ID; }
   void reset();
@@ -239,6 +248,14 @@ struct ObIODFileStat
     K_(size), K_(block_cnt), K_(block_size), K_(atime_s), K_(mtime_s), K_(ctime_s), K_(btime_s));
 };
 
+class ObIODPreadChecker
+{
+public:
+  ObIODPreadChecker() = default;
+  virtual ~ObIODPreadChecker() = default;
+  virtual int do_check(void *read_buf, const int64_t read_size) = 0;
+};
+
 struct ObIODirentEntry {
   ObIODirentEntry() : type_(0) {}
   ObIODirentEntry(const char *name, const int type) : type_(type) {
@@ -335,7 +352,8 @@ public:
     const int64_t offset,
     const int64_t size,
     void *buf,
-    int64_t &read_size) = 0;
+    int64_t &read_size,
+    ObIODPreadChecker *checker = nullptr) = 0;
   virtual int pwrite(
     const ObIOFd &fd,
     const int64_t offset,
