@@ -7,6 +7,15 @@ ob_add_new_object_target(ob_sql_extra ob_sql_extra)
 target_link_libraries(ob_sql PUBLIC ob_base config)
 target_link_libraries(ob_sql_extra PUBLIC ob_base_without_pass config)
 
+# file-as-database (read_csv/read_json/read_parquet/glob) readers and resolver
+target_sources(ob_sql PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/sql/engine/file_scan/file_sql_infer.cpp
+  ${CMAKE_SOURCE_DIR}/src/sql/engine/file_scan/file_sql_csv.cpp
+  ${CMAKE_SOURCE_DIR}/src/sql/engine/file_scan/file_sql_jsonl.cpp
+  ${CMAKE_SOURCE_DIR}/src/sql/resolver/dml/ob_file_sql_resolver.cpp)
+target_sources(ob_sql PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/sql/engine/file_scan/file_sql_parquet.cpp)
+
 seekdb_apply_unity_inventory(ob_sql_simd SEEKDB_SQL_SIMD_UNITY)
 ob_server_add_target(ob_sql_simd)
 if(ARCHITECTURE STREQUAL "x86_64" OR ARCHITECTURE STREQUAL "amd64")

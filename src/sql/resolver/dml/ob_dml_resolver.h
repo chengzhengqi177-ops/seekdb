@@ -205,6 +205,14 @@ public:
   int resolve_joined_table_item(const ParseNode &parse_node, JoinedTable *&joined_table);
   int resolve_function_table_item(const ParseNode &table_node,
                                   TableItem *&table_item);
+  // file-as-database table function: read_csv/read_json/read_ndjson/read_parquet/glob
+  int resolve_file_table_item(const ParseNode &table_node,
+                              TableItem *&table_item);
+  int resolve_file_table_columns(const TableItem &table_item,
+                                 common::ObIArray<ColumnItem> &col_items);
+  int resolve_file_table_column_item(const TableItem &table_item,
+                                     const int64_t column_index,
+                                     ColumnItem *&col_item);
   int resolve_json_table_item(const ParseNode &table_node,
                               TableItem *&table_item);
   int resolve_unnest_item(const ParseNode &table_node, TableItem *&table_item);

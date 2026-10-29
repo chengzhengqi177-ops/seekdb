@@ -180,6 +180,7 @@ int TableItem::deep_copy(ObIRawExprCopier &expr_copier,
   for_update_wait_us_ = other.for_update_wait_us_;
   skip_locked_ = other.skip_locked_;
   node_ = other.node_; // should deep copy ? seems to be unnecessary
+  file_table_def_ = other.file_table_def_;
   snapshot_query_type_ = other.snapshot_query_type_;
   // ddl related
   ddl_schema_version_ = other.ddl_schema_version_;
@@ -1219,8 +1220,8 @@ int ObDMLStmt::get_table_function_exprs(ObIArray<ObRawExpr *> &table_func_exprs)
   for (int64_t i = 0; OB_SUCC(ret) && i < table_items_.count(); ++i) {
     if (OB_ISNULL(table_items_.at(i))) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (!table_items_.at(i)->is_function_table()) {
-      // do nothing
+    } else if (!table_items_.at(i)->is_function_table() || table_items_.at(i)->is_file_table()) {
+      // do nothing (file-as-database tables have no value expression)
     } else if (OB_FAIL(table_func_exprs.push_back(table_items_.at(i)->function_table_expr_))) {
     }
   }
@@ -4074,7 +4075,11 @@ int ObDMLStmt::check_has_subquery_in_function_table(bool &has_subquery_in_functi
     if (OB_ISNULL(table)) {
       ret = OB_ERR_UNEXPECTED;
     } else if (table->is_function_table()) {
-      has_subquery_in_function_table = table->function_table_expr_->has_flag(CNT_SUB_QUERY);
+      if (table->is_file_table()) {
+        // file table functions have no expression, therefore no subquery
+      } else {
+        has_subquery_in_function_table = table->function_table_expr_->has_flag(CNT_SUB_QUERY);
+      }
     }
   }
   ObSEArray<ObSelectStmt *, 4> child_stmts;

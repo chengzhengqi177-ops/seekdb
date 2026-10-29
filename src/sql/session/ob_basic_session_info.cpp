@@ -3033,6 +3033,11 @@ int ObBasicSessionInfo::get_ob_sparse_drop_ratio_search(uint64_t &ob_sparse_drop
 {
   return get_uint64_sys_var(SYS_VAR_OB_SPARSE_DROP_RATIO_SEARCH, ob_sparse_drop_ratio_search);
 }
+
+int ObBasicSessionInfo::get_enable_file_sql(bool &enable_file_sql) const
+{
+  return get_bool_sys_var(SYS_VAR_ENABLE_FILE_SQL, enable_file_sql);
+}
 ////////////////////////////////////////////////////////////////
 int ObBasicSessionInfo::replace_user_variables(const ObSessionValMap &user_var_map)
 {

@@ -26,17 +26,32 @@ namespace oceanbase
 namespace sql
 {
 
+namespace filesql
+{
+class IFileReader;
+}
+
 class ObExpr;
 class ObFunctionTableSpec : public ObOpSpec
 {
 OB_UNIS_VERSION_V(1);
 public:
   ObFunctionTableSpec(common::ObIAllocator &alloc, const ObPhyOperatorType type)
-    : ObOpSpec(alloc, type), value_expr_(nullptr), column_exprs_(alloc), has_correlated_expr_(false)
+    : ObOpSpec(alloc, type), value_expr_(nullptr), column_exprs_(alloc), has_correlated_expr_(false),
+      file_format_(-1), file_path_(), file_flags_(0), file_size_(-1), file_mtime_(0),
+      file_column_types_(alloc)
   {}
+  // file-as-database scan; file_format_ < 0 means a regular (PL) function table
+  bool is_file_table() const { return file_format_ >= 0; }
   ObExpr *value_expr_;
   common::ObFixedArray<ObExpr*, common::ObIAllocator> column_exprs_;
   bool has_correlated_expr_;
+  int64_t file_format_;
+  common::ObString file_path_;
+  int64_t file_flags_;
+  int64_t file_size_;
+  int64_t file_mtime_;
+  common::ObFixedArray<int64_t, common::ObIAllocator> file_column_types_;
 };
 
 class ObFunctionTableOp : public ObOperator
@@ -48,6 +63,9 @@ public:
     already_calc_(false),
     row_count_(0),
     col_count_(0),
+    file_reader_(NULL),
+    glob_files_(NULL),
+    glob_idx_(0),
     value_table_(NULL) 
   {}
 
@@ -60,11 +78,17 @@ public:
 private:
   int inner_get_next_row_udf();
   int inner_get_next_row_sys_func();
+  int inner_get_next_row_file();
+  int open_file_reader();
   int get_current_result(common::ObObj &result);
   int64_t node_idx_;
   bool already_calc_;
   int64_t row_count_;
   int64_t col_count_;
+  filesql::IFileReader *file_reader_;
+  // glob() state: list of matched paths (std::vector<std::string> *), kept opaque
+  void *glob_files_;
+  int64_t glob_idx_;
   common::ObObj value_;
   pl::ObPLCollection *value_table_;
   int (ObFunctionTableOp::*next_row_func_)();

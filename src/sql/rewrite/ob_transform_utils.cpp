@@ -9093,7 +9093,7 @@ int ObTransformUtils::is_from_item_correlated(
                table->is_lateral_table()) {
       if (OB_FAIL(is_correlated_subquery(exec_params, table->ref_query_, is_correlated))) {
       }
-    } else if (table->is_function_table()) {
+    } else if (table->is_function_table() && !table->is_file_table()) {
       if (OB_FAIL(is_correlated_expr(exec_params, table->function_table_expr_, is_correlated))) {
       }
     } else if (table->is_json_table()) {
@@ -12562,7 +12562,7 @@ int ObTransformUtils::check_contain_correlated_function_table(const ObDMLStmt *s
       const TableItem *table = stmt->get_table_item(i);
       if (OB_ISNULL(table)) {
         ret = OB_ERR_UNEXPECTED;
-      } else if (!table->is_function_table()) {
+      } else if (!table->is_function_table() || table->is_file_table()) {
         // do nothing
       } else if (OB_ISNULL(table->function_table_expr_)) {
         ret = OB_ERR_UNEXPECTED;

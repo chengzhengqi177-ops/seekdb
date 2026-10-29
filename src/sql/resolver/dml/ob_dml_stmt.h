@@ -41,6 +41,8 @@ class ObStmtResolver;
 class ObDMLStmt;
 class ObStmtExprVisitor;
 class ObStmtExprGetter;
+// descriptor of a file-as-database table (read_csv/read_json/read_parquet/glob)
+struct FileTableDef;
 
 enum MulModeTableType {
   INVALID_TABLE_TYPE = 0,
@@ -150,6 +152,7 @@ struct TableItem
     snapshot_query_expr_ = nullptr;
     snapshot_query_type_ = SnapshotQueryType::NOT_USING;
     function_table_expr_ = nullptr;
+    file_table_def_ = nullptr;
     ddl_schema_version_ = 0;
     ddl_table_id_ = common::OB_INVALID_ID;
     json_table_def_ = nullptr;
@@ -222,6 +225,8 @@ struct TableItem
   bool is_has_sample_info() const { return sample_info_ != nullptr; }
   bool is_joined_table() const { return JOINED_TABLE == type_; }
   bool is_function_table() const { return FUNCTION_TABLE == type_; }
+  // file-as-database table item: FUNCTION_TABLE with a FileTableDef attached
+  bool is_file_table() const { return FUNCTION_TABLE == type_ && NULL != file_table_def_; }
   bool is_json_table() const { return JSON_TABLE == type_; }  // json_table_def_->table_type_ == MulModeTableType::OB_ORA_JSON_TABLE_TYPE
   bool is_values_table() const { return VALUES_TABLE == type_; }//used to mark values statement: values row(1,2), row(3,4);
 
@@ -293,6 +298,8 @@ struct TableItem
   ObRawExpr *snapshot_query_expr_;
   SnapshotQueryType snapshot_query_type_;
   ObRawExpr *function_table_expr_;
+  // non-null for file-as-database table items (read_csv/read_json/read_parquet/glob)
+  FileTableDef *file_table_def_;
   int64_t ddl_schema_version_;
   int64_t ddl_table_id_;
   // table partition

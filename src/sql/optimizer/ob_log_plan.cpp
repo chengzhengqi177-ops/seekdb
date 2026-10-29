@@ -912,6 +912,8 @@ int ObLogPlan::init_function_table_depend_info(const ObIArray<TableItem*> &table
       ret = OB_ERR_UNEXPECTED;
     } else if (!table->is_function_table()) {
       //do nothing
+    } else if (table->is_file_table()) {
+      // file table functions have no table dependencies
     } else if (OB_ISNULL(table->function_table_expr_)) {
       ret = OB_ERR_UNEXPECTED;
     } else if (table->function_table_expr_->get_relation_ids().is_empty()) {
@@ -2240,6 +2242,7 @@ int ObLogPlan::allocate_function_table_path(FunctionTablePath *func_table_path,
   } else {
     op->set_table_id(func_table_path->table_id_);
     op->add_values_expr(func_table_path->value_expr_);
+    op->set_file_table_def(table_item->file_table_def_);
     op->set_table_name(table_item->get_table_name());
     if (OB_FAIL(append(op->get_filter_exprs(), func_table_path->filter_))) {
     } else if (OB_FAIL(op->compute_property(func_table_path))) {

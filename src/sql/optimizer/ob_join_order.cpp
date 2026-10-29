@@ -6741,6 +6741,7 @@ int FunctionTablePath::assign(const FunctionTablePath &other, common::ObIAllocat
   } else {
     table_id_ = other.table_id_;
     value_expr_ = other.value_expr_;
+    file_table_def_ = other.file_table_def_;
   }
   return ret;
 }
@@ -8507,7 +8508,7 @@ int ObJoinOrder::generate_function_table_paths()
   if (OB_ISNULL(get_plan()) || OB_ISNULL(stmt = get_plan()->get_stmt()) || OB_ISNULL(allocator_)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_ISNULL(table_item = stmt->get_table_item_by_id(table_id_)) ||
-             OB_ISNULL(table_item->function_table_expr_)) {
+             (OB_ISNULL(table_item->function_table_expr_) && !table_item->is_file_table())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_ISNULL(func_path = reinterpret_cast<FunctionTablePath*>(
                        allocator_->alloc(sizeof(FunctionTablePath))))) {
@@ -8527,6 +8528,9 @@ int ObJoinOrder::generate_function_table_paths()
                                                                 func_path->subquery_exprs_,
                                                                 func_path->filter_,
                                                                 false /* with_onetime */ ))) {
+    } else if (table_item->is_file_table()) {
+      // file-as-database scan has no value expression and no lateral parameters
+      func_path->file_table_def_ = table_item->file_table_def_;
     } else if (OB_ISNULL(function_table_expr = table_item->function_table_expr_)) {
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_FAIL(param_funct_table_expr(function_table_expr,

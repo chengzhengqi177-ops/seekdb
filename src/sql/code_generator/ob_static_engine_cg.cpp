@@ -95,6 +95,7 @@
 #include "sql/engine/pdml/static/ob_px_sstable_insert_op.h"
 #include "sql/engine/basic/ob_select_into_op.h"
 #include "sql/engine/basic/ob_function_table_op.h"
+#include "sql/engine/file_scan/file_sql_def.h"
 #include "sql/engine/basic/ob_json_table_op.h"
 #include "sql/engine/dml/ob_table_insert_op.h"
 #include "sql/engine/basic/ob_stat_collector_op.h"
@@ -5505,6 +5506,43 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
   } else if (OB_FAIL(spec.column_exprs_.init(op.get_stmt()->get_column_size()))) {
   } else if (OB_UNLIKELY(op.get_num_of_child() > 1)) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (op.is_file_table()) {
+    const FileTableDef *def = op.get_file_table_def();
+    if (OB_ISNULL(def)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (FALSE_IT(spec.file_format_ = def->format_)) {
+    } else if (OB_FAIL(ob_write_string(alloc, def->path_, spec.file_path_))) {
+    } else if (OB_FAIL(spec.file_column_types_.init(def->column_count_))) {
+    } else {
+      spec.file_flags_ = (def->has_header_ ? 1 : 0)
+          | ((static_cast<int64_t>(static_cast<uint8_t>(def->delimiter_))) << 8)
+          | ((static_cast<int64_t>(static_cast<uint8_t>(def->quote_))) << 16)
+          | ((static_cast<int64_t>(static_cast<uint8_t>(def->escape_))) << 24);
+      spec.file_size_ = def->file_size_;
+      spec.file_mtime_ = def->file_mtime_;
+      for (int64_t i = 0; OB_SUCC(ret) && i < def->column_count_; ++i) {
+        OZ (spec.file_column_types_.push_back(def->columns_[i].logical_type_));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      for (int64_t i = 0; OB_SUCC(ret) && i < op.get_output_exprs().count(); ++i) {
+        if (OB_FAIL(mark_expr_self_produced(op.get_output_exprs().at(i)))) {
+        }
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < op.get_stmt()->get_column_size(); ++i) {
+        ObExpr *rt_expr = nullptr;
+        const ColumnItem *col_item = op.get_stmt()->get_column_item(i);
+        CK (OB_NOT_NULL(col_item));
+        CK (OB_NOT_NULL(col_item->expr_));
+        if (OB_SUCC(ret)
+            && col_item->table_id_ == op.get_table_id()
+            && col_item->expr_->is_explicited_reference()) {
+          OZ (mark_expr_self_produced(col_item->expr_));
+          OZ (generate_rt_expr(*col_item->expr_, rt_expr));
+          OZ (spec.column_exprs_.push_back(rt_expr));
+        }
+      }
+    }
   } else if (OB_ISNULL(value_raw_expr = op.get_value_expr())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(generate_rt_expr(*value_raw_expr, value_expr))) {

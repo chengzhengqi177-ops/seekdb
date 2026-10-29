@@ -23,6 +23,7 @@
 #include "lib/charset/ob_charset.h"
 #include "sql/optimizer/ob_log_plan.h"
 #include "sql/monitor/ob_sql_plan.h"
+#include "sql/engine/file_scan/file_sql_def.h"
 namespace oceanbase
 {
 using namespace common;
@@ -303,6 +304,14 @@ int ObDMLStmtPrinter::print_table(const TableItem *table_item,
         break;
       }
     case TableItem::FUNCTION_TABLE: {
+      if (table_item->is_file_table()) {
+        const FileTableDef *def = table_item->file_table_def_;
+        DATA_PRINTF("%.*s('%.*s') ", static_cast<int32_t>(table_item->table_name_.length()),
+                    table_item->table_name_.ptr(),
+                    static_cast<int32_t>(def->path_.length()), def->path_.ptr());
+        PRINT_IDENT_WITH_QUOT(table_item->alias_name_);
+        break;
+      }
       DATA_PRINTF("TABLE(");
       OZ (expr_printer_.do_print(table_item->function_table_expr_, T_FROM_SCOPE));
       DATA_PRINTF(") ");

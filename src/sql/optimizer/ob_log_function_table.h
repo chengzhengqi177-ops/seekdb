@@ -22,6 +22,8 @@ namespace oceanbase
 {
 namespace sql
 {
+// descriptor of a file-as-database table, see sql/engine/file_scan/file_sql_def.h
+struct FileTableDef;
 class ObLogFunctionTable : public ObLogicalOperator
 {
 public:
@@ -29,12 +31,16 @@ public:
       : ObLogicalOperator(plan),
         table_id_(OB_INVALID_ID),
         value_expr_(NULL),
+        file_table_def_(NULL),
         table_name_(),
         access_exprs_() { }
   virtual ~ObLogFunctionTable() {}
   void add_values_expr(ObRawExpr* expr) { value_expr_ = expr; }
   const ObRawExpr* get_value_expr() const { return value_expr_; }
   ObRawExpr* get_value_expr() { return value_expr_; }
+  void set_file_table_def(const FileTableDef *def) { file_table_def_ = def; }
+  const FileTableDef *get_file_table_def() const { return file_table_def_; }
+  bool is_file_table() const { return NULL != file_table_def_; }
   virtual uint64_t hash(uint64_t seed) const override;
   int generate_access_exprs();
   ObIArray<ObRawExpr*> &get_access_exprs() { return access_exprs_; }
@@ -54,6 +60,7 @@ public:
 private:
   uint64_t table_id_;
   ObRawExpr* value_expr_;
+  const FileTableDef *file_table_def_;
   common::ObString table_name_;
   common::ObSEArray<ObRawExpr*, 4, common::ModulePageAllocator, true> access_exprs_;
   DISALLOW_COPY_AND_ASSIGN(ObLogFunctionTable);

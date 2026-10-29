@@ -11258,6 +11258,22 @@ relation_factor %prec LOWER_PARENS
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_TABLE_COLLECTION_EXPRESSION, 2, $3, $6);
 }
+| NAME_OB '(' expr_list ')' %prec LOWER_PARENS
+{
+  // file-as-database table function: read_csv()/read_json()/read_parquet()/glob()
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $1, $3, NULL);
+  $$->sql_str_off_ = @1.first_column;
+}
+| NAME_OB '(' expr_list ')' relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $1, $3, $5);
+  $$->sql_str_off_ = @1.first_column;
+}
+| NAME_OB '(' expr_list ')' AS relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $1, $3, $6);
+  $$->sql_str_off_ = @1.first_column;
+}
 ;
 
 dml_table_name:

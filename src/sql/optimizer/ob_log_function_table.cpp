@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_OPT
 
 #include "sql/optimizer/ob_log_function_table.h"
+#include "sql/engine/file_scan/file_sql_def.h"
 
 using namespace oceanbase::common;
 
@@ -78,6 +79,13 @@ int ObLogFunctionTable::get_plan_item_info(PlanText &plan_text,
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(ObLogicalOperator::get_plan_item_info(plan_text, plan_item))) {
+  } else if (is_file_table()) {
+    // file-as-database scan: print the source path instead of a value expression
+    BEGIN_BUF_PRINT;
+    const ObString &path = get_file_table_def()->path_;
+    BUF_PRINTF("file:%.*s", path.length(), path.ptr());
+    END_BUF_PRINT(plan_item.special_predicates_,
+                  plan_item.special_predicates_len_);
   } else if (OB_ISNULL(get_value_expr())) {
     ret = OB_ERR_UNEXPECTED;
   } else {
@@ -93,7 +101,7 @@ int ObLogFunctionTable::get_plan_item_info(PlanText &plan_text,
                      name.length(), 
                      plan_item.object_alias_, 
                      plan_item.object_alias_len_);
-    BUF_PRINT_STR("FUNCTION TABLE",
+    BUF_PRINT_STR(is_file_table() ? "FILE TABLE" : "FUNCTION TABLE",
                   plan_item.object_type_,
                   plan_item.object_type_len_);
   }
