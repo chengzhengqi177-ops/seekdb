@@ -39,6 +39,85 @@ namespace oceanbase
 {
 namespace sql
 {
+
+// Tokenize 属性 JSON 处理结果的小缓存。
+// reform_parser_properties() 每次调用都要做「JSON 解析 + 重建 + 序列化」，
+// 而同一 SQL 反复执行时输入完全相同，结果也是纯函数结果。
+// 这里缓存最近若干条 (parser_name, properties) -> reform 后的 JSON 字符串。
+static constexpr int64_t TOK_PROPS_CACHE_SLOTS = 8;
+static ObArenaAllocator g_tok_props_alloc(ObMemAttr("TokPropsCache"));
+static pthread_mutex_t g_tok_props_mutex = PTHREAD_MUTEX_INITIALIZER;
+struct ObTokPropsCacheEntry
+{
+  ObString name_;   // key 1
+  ObString input_;  // key 2
+  ObString output_; // 结果
+  bool used_;
+};
+static ObTokPropsCacheEntry g_tok_props_cache[TOK_PROPS_CACHE_SLOTS];
+
+// 查缓存：命中返回 true 并填 output。
+static bool tok_props_cache_get(const ObString &name,
+                                const ObString &input,
+                                ObString &output)
+{
+  bool hit = false;
+  pthread_mutex_lock(&g_tok_props_mutex);
+  for (int64_t i = 0; i < TOK_PROPS_CACHE_SLOTS; ++i) {
+    if (g_tok_props_cache[i].used_
+        && g_tok_props_cache[i].name_ == name
+        && g_tok_props_cache[i].input_ == input) {
+      output = g_tok_props_cache[i].output_;
+      hit = true;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_tok_props_mutex);
+  return hit;
+}
+
+// 写缓存（拷贝到持久 allocator）。
+static void tok_props_cache_put(const ObString &name,
+                                const ObString &input,
+                                const ObString &output)
+{
+  if (output.empty()) {
+    return;
+  }
+  pthread_mutex_lock(&g_tok_props_mutex);
+  int64_t slot = -1;
+  for (int64_t i = 0; i < TOK_PROPS_CACHE_SLOTS; ++i) {
+    if (!g_tok_props_cache[i].used_) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot < 0) {
+    // 槽位已满：直接覆盖第 0 号。
+    // 注意：这里刻意不释放 allocator 内存 —— 其他线程可能仍持有指向
+    // 已缓存字符串的指针，reuse() 会造成悬空引用。槽位固定 8 个，内存有界。
+    slot = 0;
+  }
+  char *n_buf = static_cast<char *>(g_tok_props_alloc.alloc(name.length()));
+  char *i_buf = static_cast<char *>(g_tok_props_alloc.alloc(input.length()));
+  char *o_buf = static_cast<char *>(g_tok_props_alloc.alloc(output.length()));
+  if (OB_NOT_NULL(n_buf) && OB_NOT_NULL(o_buf)
+      && (0 == input.length() || OB_NOT_NULL(i_buf))) {
+    if (name.length() > 0) {
+      MEMCPY(n_buf, name.ptr(), name.length());
+    }
+    if (input.length() > 0) {
+      MEMCPY(i_buf, input.ptr(), input.length());
+    }
+    MEMCPY(o_buf, output.ptr(), output.length());
+    g_tok_props_cache[slot].name_ = ObString(name.length(), n_buf);
+    g_tok_props_cache[slot].input_ = ObString(input.length(), i_buf);
+    g_tok_props_cache[slot].output_ = ObString(output.length(), o_buf);
+    g_tok_props_cache[slot].used_ = true;
+  }
+  pthread_mutex_unlock(&g_tok_props_mutex);
+}
+
 ObExprTokenize::ObExprTokenize(common::ObIAllocator &alloc)
     : ObStringExprOperator(alloc,
                            T_FUN_TOKENIZE,
@@ -376,14 +455,20 @@ int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &prop
 {
   int ret = OB_SUCCESS;
   storage::ObFTParserJsonProps parser_properties;
+  ObString cached;
 
-  if (OB_FAIL(parser_properties.init())) {
+  if (tok_props_cache_get(parser_name_, properties, cached)) {
+    // 命中缓存：跳过 JSON 解析、重建与序列化。
+    properties_ = cached;
+  } else if (OB_FAIL(parser_properties.init())) {
   } else if (OB_FAIL(parser_properties.parse_from_valid_str(properties))) {
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "parser properties invalid.");
   } else if (OB_FAIL(parser_properties.rebuild_props_for_ddl(parser_name_,
                                                              ObCollationType::CS_TYPE_UTF8MB4_BIN,
                                                              true))) {
   } else if (OB_FAIL(parser_properties.to_format_json(allocator_, properties_))) {
+  } else {
+    tok_props_cache_put(parser_name_, properties, properties_);
   }
 
   return ret;
