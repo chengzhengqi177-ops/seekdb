@@ -105,7 +105,7 @@ int get_relation_factor_name(const ParseNode &node, ObString &name)
       LOG_WARN("invalid relation factor node", K(ret));
     } else if (OB_UNLIKELY(node.num_child_ > 1 && NULL != node.children_[1])) {
       // db.tbl(...) is not accepted for file table functions
-      ret = OB_ERR_PARSER_SYNTAX;
+      ret = OB_ERR_PARSE_SQL;
       LOG_WARN("file table function name must be a plain identifier", K(ret));
     } else {
       const ParseNode *ident = node.children_[0];
@@ -175,7 +175,7 @@ int get_literal_obj(const ParseNode &node, const common::ParamStore *param_list,
         obj.set_null();
         break;
       default:
-        ret = OB_ERR_PARSER_SYNTAX;
+        ret = OB_ERR_PARSE_SQL;
         LOG_WARN("expect a literal argument", K(ret), "node_type", node.type_);
         break;
     }
@@ -191,7 +191,7 @@ int value_to_bool(const ParseNode &node, const common::ParamStore *param_list, b
   } else if (obj.is_tinyint() || obj.is_int() || obj.is_uint64()) {
     v = (0 != obj.get_int());
   } else {
-    ret = OB_ERR_PARSER_SYNTAX;
+    ret = OB_ERR_PARSE_SQL;
     LOG_WARN("expect a boolean literal", K(ret));
   }
   return ret;
@@ -207,7 +207,7 @@ int value_to_int(const ParseNode &node, const common::ParamStore *param_list, in
   } else if (obj.is_double()) {
     v = static_cast<int64_t>(obj.get_double());
   } else {
-    ret = OB_ERR_PARSER_SYNTAX;
+    ret = OB_ERR_PARSE_SQL;
     LOG_WARN("expect an integer literal", K(ret));
   }
   return ret;
@@ -221,7 +221,7 @@ int value_to_string(const ParseNode &node, const common::ParamStore *param_list,
   } else if (obj.is_varchar_or_char() || obj.is_string_type()) {
     v = obj.get_string();
   } else {
-    ret = OB_ERR_PARSER_SYNTAX;
+    ret = OB_ERR_PARSE_SQL;
     LOG_WARN("expect a string literal", K(ret));
   }
   return ret;
@@ -232,14 +232,14 @@ int parse_one_option(const ParseNode &arg, const common::ParamStore *param_list,
   int ret = OB_SUCCESS;
   if (OB_ISNULL(arg.children_) || 2 != arg.num_child_ || OB_ISNULL(arg.children_[0])
       || OB_ISNULL(arg.children_[1])) {
-    ret = OB_ERR_PARSER_SYNTAX;
+    ret = OB_ERR_PARSE_SQL;
     LOG_WARN("invalid named argument", K(ret));
   } else {
     const ParseNode *name_node = arg.children_[0];
     const ParseNode *value_node = arg.children_[1];
     if (T_COLUMN_REF != name_node->type_ || OB_ISNULL(name_node->children_)
         || OB_ISNULL(name_node->children_[2])) {
-      ret = OB_ERR_PARSER_SYNTAX;
+      ret = OB_ERR_PARSE_SQL;
       LOG_WARN("option name must be an identifier", K(ret));
     } else {
       const ParseNode *ident = name_node->children_[2];
@@ -253,14 +253,14 @@ int parse_one_option(const ParseNode &arg, const common::ParamStore *param_list,
         OZ (value_to_string(*value_node, param_list, fmt));
         if (OB_SUCC(ret) && !file_name_is(fmt, "newline_delimited")
             && !file_name_is(fmt, "ndjson")) {
-          ret = OB_ERR_PARSER_SYNTAX;
+          ret = OB_ERR_PARSE_SQL;
           LOG_WARN("only format='newline_delimited' is supported", K(ret));
         }
       } else if (file_name_is(opt_name, "delimiter")) {
         ObString delim;
         OZ (value_to_string(*value_node, param_list, delim));
         if (OB_SUCC(ret) && 1 != delim.length()) {
-          ret = OB_ERR_PARSER_SYNTAX;
+          ret = OB_ERR_PARSE_SQL;
         } else if (OB_SUCC(ret)) {
           opts.delimiter_ = delim[0];
         }
@@ -268,7 +268,7 @@ int parse_one_option(const ParseNode &arg, const common::ParamStore *param_list,
         ObString q;
         OZ (value_to_string(*value_node, param_list, q));
         if (OB_SUCC(ret) && 1 != q.length()) {
-          ret = OB_ERR_PARSER_SYNTAX;
+          ret = OB_ERR_PARSE_SQL;
         } else if (OB_SUCC(ret)) {
           opts.quote_ = q[0];
         }
@@ -276,12 +276,12 @@ int parse_one_option(const ParseNode &arg, const common::ParamStore *param_list,
         ObString esc;
         OZ (value_to_string(*value_node, param_list, esc));
         if (OB_SUCC(ret) && 1 != esc.length()) {
-          ret = OB_ERR_PARSER_SYNTAX;
+          ret = OB_ERR_PARSE_SQL;
         } else if (OB_SUCC(ret)) {
           opts.escape_ = esc[0];
         }
       } else {
-        ret = OB_ERR_PARSER_SYNTAX;
+        ret = OB_ERR_PARSE_SQL;
         LOG_WARN("unknown file table function option", K(ret), K(opt_name));
       }
     }
@@ -321,6 +321,7 @@ int build_obj_meta(const int64_t logical_type, ObObjMeta &meta, ObAccuracy &accu
     case FILE_SQL_TYPE_DATETIME:
       meta.set_datetime();
       accuracy = ObAccuracy::DDL_DEFAULT_ACCURACY2[0][ObDateTimeType];
+      accuracy.set_scale(0);
       break;
     case FILE_SQL_TYPE_NULL:
     default:
@@ -429,7 +430,7 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
     OZ (get_relation_factor_name(*parse_tree.children_[0], func_name));
   }
   if (OB_SUCC(ret) && !parse_logical_format(func_name, opts.format_)) {
-    ret = OB_ERR_PARSER_SYNTAX;
+    ret = OB_ERR_PARSE_SQL;
     LOG_WARN("unknown file table function", K(ret), K(func_name));
   }
   // parse positional and named arguments
@@ -459,7 +460,7 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
             OZ (value_to_string(*arg, params_.param_list_, opts.path_));
             has_path = true;
           } else {
-            ret = OB_ERR_PARSER_SYNTAX;
+            ret = OB_ERR_PARSE_SQL;
             LOG_WARN("unexpected positional argument", K(ret));
           }
         }
@@ -482,7 +483,7 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
             OZ (value_to_string(*arg, params_.param_list_, opts.path_));
             has_path = true;
           } else {
-            ret = OB_ERR_PARSER_SYNTAX;
+            ret = OB_ERR_PARSE_SQL;
             LOG_WARN("unexpected positional argument", K(ret));
           }
         }
@@ -491,7 +492,7 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
     }
   }
   if (OB_SUCC(ret) && !has_path) {
-    ret = OB_ERR_PARSER_SYNTAX;
+    ret = OB_ERR_PARSE_SQL;
     LOG_WARN("file table function requires a file path", K(ret));
   }
   if (OB_SUCC(ret) && opts.sample_size_ != -1) {

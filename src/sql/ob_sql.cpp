@@ -17,6 +17,10 @@
 #define USING_LOG_PREFIX SQL
 #include "config_bridge.h"
 #include "sql/ob_sql.h"
+#include "sql/parser/ob_parser.h"
+#include "sql/resolver/ddl/ob_explain_stmt.h"
+#include "sql/engine/file_scan/file_sql_def.h"
+#include "lib/string/ob_sql_string.h"
 #include "lib/json/ob_json_print_utils.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "query/runtime/ob_query_runtime_environment.h"
@@ -1927,6 +1931,574 @@ int ObSql::handle_ps_execute(const ObPsStmtId client_stmt_id,
   return ret;
 }
 
+namespace
+{
+
+int append_sql_string_literal(ObSqlString &sql, const ObString &value);
+
+// ---------------------------------------------------------------------------
+// COPY (query) TO 'file' (format csv, header, nullstr 'NULL') support.
+//
+// The statement is rewritten into an equivalent SELECT ... INTO OUTFILE so that
+// the existing planner/executor machinery writes the file. The header line is
+// produced as the first row of a UNION ALL branch over string literals.
+// ---------------------------------------------------------------------------
+
+// Whether the SQL text uses file-as-database table functions. Such statements
+// must not use the plan cache: the file path/schema is baked into the plan.
+bool sql_has_file_function(const common::ObString &sql)
+{
+  bool found = false;
+  const char *names[] = { "read_csv(", "read_json(", "read_ndjson(", "read_parquet(", "glob(" };
+  for (int64_t i = 0; !found && i < static_cast<int64_t>(sizeof(names) / sizeof(names[0])); ++i) {
+    const int64_t name_len = static_cast<int64_t>(strlen(names[i]));
+    for (int64_t p = 0; !found && p + name_len <= sql.length(); ++p) {
+      if (0 == strncasecmp(sql.ptr() + p, names[i], static_cast<size_t>(name_len))) {
+        found = true;
+      }
+    }
+  }
+  return found;
+}
+
+bool copy_kw(const char *p, const int64_t len, const char *kw)
+{
+  const int64_t kw_len = static_cast<int64_t>(strlen(kw));
+  return len >= kw_len && 0 == strncasecmp(p, kw, static_cast<size_t>(kw_len));
+}
+
+void copy_skip_space(const char *s, const int64_t len, int64_t &pos)
+{
+  while (pos < len && (' ' == s[pos] || '\t' == s[pos] || '\n' == s[pos] || '\r' == s[pos])) {
+    ++pos;
+  }
+}
+
+// find the matching ')' for the '(' at s[pos]
+int copy_find_matching_paren(const char *s, const int64_t len, int64_t pos, int64_t &end)
+{
+  int ret = OB_SUCCESS;
+  int64_t depth = 0;
+  bool in_single = false;
+  bool in_double = false;
+  bool in_backtick = false;
+  for (; OB_SUCC(ret) && pos < len; ++pos) {
+    const char ch = s[pos];
+    if (in_single) {
+      if ('\'' == ch) {
+        if (pos + 1 < len && '\'' == s[pos + 1]) {
+          ++pos;
+        } else {
+          in_single = false;
+        }
+      }
+    } else if (in_double) {
+      if ('"' == ch) {
+        if (pos + 1 < len && '"' == s[pos + 1]) {
+          ++pos;
+        } else {
+          in_double = false;
+        }
+      }
+    } else if (in_backtick) {
+      if ('`' == ch) {
+        in_backtick = false;
+      }
+    } else if ('\'' == ch) {
+      in_single = true;
+    } else if ('"' == ch) {
+      in_double = true;
+    } else if ('`' == ch) {
+      in_backtick = true;
+    } else if ('(' == ch) {
+      ++depth;
+    } else if (')' == ch) {
+      --depth;
+      if (0 == depth) {
+        end = pos;
+        break;
+      }
+    }
+  }
+  if (OB_SUCC(ret) && (pos >= len || 0 != depth)) {
+    ret = OB_ERR_PARSE_SQL;
+  }
+  return ret;
+}
+
+// read a quoted string literal starting at s[pos], return unescaped content
+int copy_read_string(const char *s, const int64_t len, int64_t &pos, common::ObString &out,
+                     common::ObIAllocator &alloc)
+{
+  int ret = OB_SUCCESS;
+  if (pos >= len || ('\'' != s[pos] && '"' != s[pos])) {
+    ret = OB_ERR_PARSE_SQL;
+  } else {
+    const char quote = s[pos++];
+    const int64_t begin = pos;
+    bool closed = false;
+    while (pos < len) {
+      if (quote == s[pos]) {
+        if (pos + 1 < len && quote == s[pos + 1]) {
+          pos += 2;
+        } else {
+          closed = true;
+          break;
+        }
+      } else {
+        ++pos;
+      }
+    }
+    if (!closed) {
+      ret = OB_ERR_PARSE_SQL;
+    } else {
+      char *buf = static_cast<char *>(alloc.alloc(pos - begin + 1));
+      if (NULL == buf) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        int64_t out_len = 0;
+        for (int64_t i = begin; i < pos; ++i) {
+          if (quote == s[i] && i + 1 < pos && quote == s[i + 1]) {
+            buf[out_len++] = quote;
+            ++i;
+          } else {
+            buf[out_len++] = s[i];
+          }
+        }
+        out.assign_ptr(buf, static_cast<int32_t>(out_len));
+      }
+      ++pos; // skip closing quote
+    }
+  }
+  return ret;
+}
+
+// extract the select-list names of `select a, b as c ... from ...`
+int copy_select_column_names(const char *s, const int64_t len, common::ObIAllocator &alloc,
+                             common::ObSqlString &names)
+{
+  int ret = OB_SUCCESS;
+  int64_t pos = 0;
+  copy_skip_space(s, len, pos);
+  if (OB_SUCC(ret) && !copy_kw(s + pos, len - pos, "select")) {
+    ret = OB_ERR_PARSE_SQL;
+  } else {
+    pos += 6;
+    int64_t list_end = -1;
+    int64_t depth = 0;
+    bool in_single = false;
+    bool in_double = false;
+    bool in_backtick = false;
+    for (int64_t i = pos; OB_SUCC(ret) && i < len; ++i) {
+      const char ch = s[i];
+      if (in_single) {
+        if ('\'' == ch) {
+          if (i + 1 < len && '\'' == s[i + 1]) {
+            ++i;
+          } else {
+            in_single = false;
+          }
+        }
+      } else if (in_double) {
+        if ('"' == ch) {
+          in_double = false;
+        }
+      } else if (in_backtick) {
+        if ('`' == ch) {
+          in_backtick = false;
+        }
+      } else if ('\'' == ch) {
+        in_single = true;
+      } else if ('"' == ch) {
+        in_double = true;
+      } else if ('`' == ch) {
+        in_backtick = true;
+      } else if ('(' == ch) {
+        ++depth;
+      } else if (')' == ch) {
+        --depth;
+      } else if (0 == depth && ' ' == ch && i + 5 < len
+                 && 0 == strncasecmp(s + i + 1, "from", 4)
+                 && (' ' == s[i + 5] || '\t' == s[i + 5] || '\n' == s[i + 5])) {
+        list_end = i;
+        break;
+      }
+    }
+    if (OB_SUCC(ret) && list_end < 0) {
+      ret = OB_ERR_PARSE_SQL;
+    }
+    int64_t item_begin = pos;
+    depth = 0;
+    in_single = false;
+    in_double = false;
+    in_backtick = false;
+    for (int64_t i = pos; OB_SUCC(ret) && i <= list_end; ++i) {
+      const char ch = (i < list_end) ? s[i] : ',';
+      bool split = false;
+      if (in_single) {
+        if ('\'' == ch) {
+          if (i + 1 < list_end && '\'' == s[i + 1]) {
+            ++i;
+          } else {
+            in_single = false;
+          }
+        }
+      } else if (in_double) {
+        if ('"' == ch) {
+          in_double = false;
+        }
+      } else if (in_backtick) {
+        if ('`' == ch) {
+          in_backtick = false;
+        }
+      } else if ('\'' == ch) {
+        in_single = true;
+      } else if ('"' == ch) {
+        in_double = true;
+      } else if ('`' == ch) {
+        in_backtick = true;
+      } else if ('(' == ch) {
+        ++depth;
+      } else if (')' == ch) {
+        --depth;
+      } else if (0 == depth && ',' == ch) {
+        split = true;
+      }
+      if (split) {
+        int64_t b = item_begin;
+        int64_t e = i;
+        while (b < e && (' ' == s[b] || '\t' == s[b] || '\n' == s[b])) { ++b; }
+        while (e > b && (' ' == s[e - 1] || '\t' == s[e - 1] || '\n' == s[e - 1])) { --e; }
+        int64_t name_begin = b;
+        for (int64_t k = b; k + 3 < e; ++k) {
+          if (' ' == s[k] && 0 == strncasecmp(s + k + 1, "as", 2)
+              && (' ' == s[k + 3] || '\t' == s[k + 3])) {
+            name_begin = k + 3;
+            while (name_begin < e && (' ' == s[name_begin] || '\t' == s[name_begin])) { ++name_begin; }
+          }
+        }
+        if (name_begin + 1 < e && '`' == s[name_begin] && '`' == s[e - 1]) {
+          ++name_begin;
+          --e;
+        }
+        if (e <= name_begin) {
+          ret = OB_ERR_PARSE_SQL;
+        } else {
+          if (names.length() > 0) {
+            OZ (names.append(", "));
+          }
+          char tmp[512];
+          const int64_t copy_len = (e - name_begin) < 500 ? (e - name_begin) : 500;
+          MEMCPY(tmp, s + name_begin, copy_len);
+          tmp[copy_len] = '\0';
+          OZ (names.append(tmp));
+        }
+        item_begin = i + 1;
+      }
+    }
+  }
+  return ret;
+}
+
+int rewrite_copy_stmt(common::ObIAllocator &alloc, const common::ObString &in,
+                      common::ObString &out, bool &rewritten)
+{
+  int ret = OB_SUCCESS;
+  rewritten = false;
+  const char *s = in.ptr();
+  const int64_t len = in.length();
+  int64_t pos = 0;
+  copy_skip_space(s, len, pos);
+  if (OB_SUCC(ret) && !copy_kw(s + pos, len - pos, "copy")) {
+    // not a COPY statement
+  } else {
+    pos += 4;
+    copy_skip_space(s, len, pos);
+    if (OB_SUCC(ret) && (pos >= len || '(' != s[pos])) {
+      ret = OB_ERR_PARSE_SQL;
+    }
+    int64_t query_begin = pos + 1;
+    int64_t query_end = -1;
+    if (OB_SUCC(ret)) {
+      OZ (copy_find_matching_paren(s, len, pos, query_end));
+    }
+    if (OB_SUCC(ret)) {
+      pos = query_end + 1;
+      copy_skip_space(s, len, pos);
+      if (!copy_kw(s + pos, len - pos, "to")) {
+        ret = OB_ERR_PARSE_SQL;
+      } else {
+        pos += 2;
+        copy_skip_space(s, len, pos);
+      }
+    }
+    common::ObString path;
+    if (OB_SUCC(ret)) {
+      OZ (copy_read_string(s, len, pos, path, alloc));
+      copy_skip_space(s, len, pos);
+    }
+    bool has_header = false;
+    if (OB_SUCC(ret) && pos < len) {
+      if ('(' != s[pos]) {
+        ret = OB_ERR_PARSE_SQL;
+      } else {
+        int64_t opt_end = -1;
+        OZ (copy_find_matching_paren(s, len, pos, opt_end));
+        if (OB_SUCC(ret)) {
+          const char *o = s + pos + 1;
+          const int64_t olen = opt_end - pos - 1;
+          int64_t op = 0;
+          while (OB_SUCC(ret) && op < olen) {
+            copy_skip_space(o, olen, op);
+            if (op >= olen) {
+              break;
+            }
+            if (copy_kw(o + op, olen - op, "format")) {
+              op += 6;
+              copy_skip_space(o, olen, op);
+              if (op < olen && '=' == o[op]) { ++op; }
+              copy_skip_space(o, olen, op);
+              common::ObString fmt;
+              if (op < olen && ('\'' == o[op] || '"' == o[op])) {
+                OZ (copy_read_string(o, olen, op, fmt, alloc));
+              } else {
+                const int64_t fmt_begin = op;
+                while (op < olen && !(' ' == o[op] || '\t' == o[op] || ',' == o[op] || '=' == o[op])) {
+                  ++op;
+                }
+                fmt.assign_ptr(o + fmt_begin, static_cast<int32_t>(op - fmt_begin));
+              }
+              if (OB_SUCC(ret) && !(fmt.length() == 3 && 0 == strncasecmp(fmt.ptr(), "csv", 3))) {
+                ret = OB_ERR_PARSE_SQL;
+              }
+            } else if (copy_kw(o + op, olen - op, "header")) {
+              op += 6;
+              copy_skip_space(o, olen, op);
+              if (op < olen && '=' == o[op]) { ++op; }
+              copy_skip_space(o, olen, op);
+              has_header = true;
+              if (op < olen && ('t' == o[op] || 'T' == o[op] || 'f' == o[op] || 'F' == o[op])) {
+                has_header = ('t' == o[op] || 'T' == o[op]);
+                while (op < olen && isalpha(static_cast<unsigned char>(o[op]))) { ++op; }
+              }
+            } else if (copy_kw(o + op, olen - op, "nullstr")) {
+              op += 7;
+              copy_skip_space(o, olen, op);
+              if (op < olen && '=' == o[op]) { ++op; }
+              copy_skip_space(o, olen, op);
+              common::ObString nullstr;
+              OZ (copy_read_string(o, olen, op, nullstr, alloc));
+            } else {
+              ret = OB_ERR_PARSE_SQL;
+            }
+            if (OB_SUCC(ret)) {
+              copy_skip_space(o, olen, op);
+              if (op < olen && ',' == o[op]) {
+                ++op;
+              } else if (op < olen) {
+                ret = OB_ERR_PARSE_SQL;
+              }
+            }
+          }
+        }
+      }
+    }
+    common::ObString query;
+    if (OB_SUCC(ret)) {
+      query.assign_ptr(s + query_begin, static_cast<int32_t>(query_end - query_begin));
+    }
+    common::ObSqlString sql;
+    if (OB_SUCC(ret)) {
+      OZ (sql.append("select * from ("));
+    }
+    if (OB_SUCC(ret) && has_header) {
+      common::ObSqlString names;
+      OZ (copy_select_column_names(query.ptr(), query.length(), alloc, names));
+      OZ (sql.append("select "));
+      int64_t npos = 0;
+      const char *np = names.ptr();
+      const int64_t nlen = names.length();
+      bool first = true;
+      while (OB_SUCC(ret) && npos <= nlen) {
+        int64_t comma = npos;
+        while (comma < nlen && ',' != np[comma]) { ++comma; }
+        int64_t b = npos;
+        int64_t e = comma;
+        while (b < e && ' ' == np[b]) { ++b; }
+        while (e > b && ' ' == np[e - 1]) { --e; }
+        if (e > b) {
+          if (!first) {
+            OZ (sql.append(", "));
+          }
+          first = false;
+          common::ObString one;
+          one.assign_ptr(np + b, static_cast<int32_t>(e - b));
+          OZ (append_sql_string_literal(sql, one));
+          OZ (sql.append(" as "));
+          OZ (sql.append(one));
+        }
+        npos = comma + 1;
+      }
+      OZ (sql.append(" union all ("));
+    }
+    if (OB_SUCC(ret)) {
+      OZ (sql.append(query));
+    }
+    if (OB_SUCC(ret) && has_header) {
+      OZ (sql.append(")"));
+    }
+    if (OB_SUCC(ret)) {
+      OZ (sql.append(") __ob_copy into outfile "));
+      OZ (append_sql_string_literal(sql, path));
+      OZ (sql.append(" fields terminated by ',' optionally enclosed by '\"' lines terminated by '\\n'"));
+    }
+    if (OB_SUCC(ret)) {
+      OZ (ob_write_string(alloc, sql.string(), out));
+      rewritten = true;
+    }
+  }
+  return ret;
+}
+
+
+bool sql_is_describe_stmt(const common::ObString &sql)
+{
+  bool is_describe = false;
+  int64_t pos = 0;
+  while (pos < sql.length()
+         && (' ' == sql[pos] || '\t' == sql[pos] || '\n' == sql[pos] || '\r' == sql[pos])) {
+    ++pos;
+  }
+  const char *text = sql.ptr() + pos;
+  const int64_t remain = sql.length() - pos;
+  if (remain >= 8 && 0 == strncasecmp(text, "describe", 8)
+      && (remain == 8 || ' ' == text[8] || '\t' == text[8] || '\n' == text[8])) {
+    is_describe = true;
+  } else if (remain >= 4 && 0 == strncasecmp(text, "desc", 4)
+             && (remain == 4 || ' ' == text[4] || '\t' == text[4] || '\n' == text[4])) {
+    is_describe = true;
+  }
+  return is_describe;
+}
+
+bool stmt_contains_file_table(const ObDMLStmt *stmt)
+{
+  bool found = false;
+  if (NULL != stmt) {
+    for (int64_t i = 0; !found && i < stmt->get_table_size(); ++i) {
+      const TableItem *table_item = stmt->get_table_item(i);
+      if (NULL != table_item && table_item->is_file_table()) {
+        found = true;
+      }
+    }
+  }
+  return found;
+}
+
+const char *file_sql_type_name(const int64_t logical_type)
+{
+  const char *name = "VARCHAR";
+  switch (logical_type) {
+    case FILE_SQL_TYPE_BIGINT: name = "BIGINT"; break;
+    case FILE_SQL_TYPE_DOUBLE: name = "DOUBLE"; break;
+    case FILE_SQL_TYPE_BOOLEAN: name = "BOOLEAN"; break;
+    case FILE_SQL_TYPE_VARCHAR: name = "VARCHAR"; break;
+    case FILE_SQL_TYPE_DATE: name = "DATE"; break;
+    case FILE_SQL_TYPE_DATETIME: name = "DATETIME"; break;
+    case FILE_SQL_TYPE_NULL: name = "NULL"; break;
+    default: name = "VARCHAR"; break;
+  }
+  return name;
+}
+
+const char *file_sql_obj_type_name(const ObObjType type)
+{
+  const char *name = "VARCHAR";
+  if (ob_is_integer_type(type)) {
+    name = "BIGINT";
+  } else if (ob_is_double_type(type) || ob_is_float_type(type) || ob_is_number_tc(type)) {
+    name = "DOUBLE";
+  } else if (ob_is_string_type(type) || ob_is_text_tc(type)) {
+    name = "VARCHAR";
+  } else if (ObDateType == type) {
+    name = "DATE";
+  } else if (ObDateTimeType == type) {
+    name = "DATETIME";
+  } else if (ObNullType == type) {
+    name = "NULL";
+  }
+  return name;
+}
+
+int append_sql_string_literal(ObSqlString &sql, const ObString &value)
+{
+  int ret = OB_SUCCESS;
+  OZ (sql.append("'"));
+  for (int64_t i = 0; OB_SUCC(ret) && i < value.length(); ++i) {
+    const char c = value.ptr()[i];
+    if ('\'' == c) {
+      OZ (sql.append("''"));
+    } else {
+      char buf[2] = { c, '\0' };
+      OZ (sql.append(buf));
+    }
+  }
+  OZ (sql.append("'"));
+  return ret;
+}
+
+int build_file_describe_sql(const ObSelectStmt &select_stmt, ObSqlString &describe_sql)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt.get_select_item_size(); ++i) {
+    const SelectItem &item = select_stmt.get_select_item(i);
+    const ObRawExpr *expr = item.expr_;
+    ObString column_name;
+    ObString column_type;
+    ObString nullable;
+    if (!item.alias_name_.empty()) {
+      column_name = item.alias_name_;
+    } else if (!item.expr_name_.empty()) {
+      column_name = item.expr_name_;
+    } else {
+      column_name = ObString::make_string("column");
+    }
+    column_type = ObString::make_string("VARCHAR");
+    nullable = ObString::make_string("YES");
+    if (NULL != expr && T_REF_COLUMN == expr->get_expr_type()) {
+      const ObColumnRefRawExpr *column_expr = static_cast<const ObColumnRefRawExpr *>(expr);
+      const TableItem *table_item = select_stmt.get_table_item_by_id(column_expr->get_table_id());
+      if (NULL != table_item && table_item->is_file_table() && NULL != table_item->file_table_def_) {
+        const FileTableDef *def = table_item->file_table_def_;
+        const int64_t index = static_cast<int64_t>(column_expr->get_column_id()) - OB_APP_MIN_COLUMN_ID;
+        if (index >= 0 && index < def->column_count_) {
+          column_type = ObString::make_string(file_sql_type_name(def->columns_[index].logical_type_));
+          nullable = ObString::make_string(def->columns_[index].nullable_ ? "YES" : "NO");
+        }
+      } else {
+        column_type = ObString::make_string(file_sql_obj_type_name(column_expr->get_data_type()));
+      }
+    } else if (NULL != expr) {
+      column_type = ObString::make_string(file_sql_obj_type_name(expr->get_data_type()));
+    }
+    if (OB_SUCC(ret)) {
+      if (i > 0) {
+        OZ (describe_sql.append(" union all "));
+      }
+      OZ (describe_sql.append("select "));
+      OZ (append_sql_string_literal(describe_sql, column_name));
+      OZ (describe_sql.append(" as column_name, "));
+      OZ (append_sql_string_literal(describe_sql, column_type));
+      OZ (describe_sql.append(" as column_type, "));
+      OZ (append_sql_string_literal(describe_sql, nullable));
+      OZ (describe_sql.append(" as `null`, NULL as `key`, NULL as `default`, NULL as `extra`"));
+    }
+  }
+  return ret;
+}
+
+} // namespace
+
 OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, ObResultSet &result)
 {
   int ret = OB_SUCCESS;
@@ -1946,8 +2518,22 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
   ObSQLSessionInfo &session = result.get_session();
   
   ObExecContext& ectx = result.get_exec_context();
+  // COPY (query) TO ... : rewrite into SELECT ... INTO OUTFILE before parsing
+  if (OB_SUCC(ret)) {
+    common::ObString rewritten_sql;
+    bool is_copy_rewritten = false;
+    if (OB_FAIL(rewrite_copy_stmt(allocator, trimed_stmt, rewritten_sql, is_copy_rewritten))) {
+      LOG_WARN("rewrite COPY statement failed", K(ret));
+    } else if (is_copy_rewritten) {
+      trimed_stmt = rewritten_sql;
+    }
+  }
   int get_plan_err = OB_SUCCESS; //used for judge whether add plan to plan cache
   bool use_plan_cache = session.get_local_ob_enable_plan_cache();
+  const bool is_file_sql = sql_has_file_function(trimed_stmt);
+  if (is_file_sql) {
+    use_plan_cache = false;
+  }
   ObPlanCacheCtx *pc_ctx = NULL;
   bool is_begin_commit_stmt = false;
 
@@ -1963,6 +2549,9 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
                                          allocator,
                                          context,
                                          ectx);
+    if (is_file_sql) {
+      pc_ctx->should_add_plan_ = false;
+    }
     if (trimed_stmt.length() == 6) {
       // Whether it is a COMMIT statement
       is_begin_commit_stmt = (0 == STRNCASECMP(trimed_stmt.ptr(), "commit", 6)
@@ -2018,6 +2607,7 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
   }
   return ret;
 }
+
 
 int ObSql::generate_stmt(ParseResult &parse_result,
                          ObPlanCacheCtx *pc_ctx,
@@ -2141,6 +2731,48 @@ int ObSql::generate_stmt(ParseResult &parse_result,
         ret = resolver.resolve(ObResolver::IS_NOT_PREPARED_STMT, tmp_node, stmt);
       } else {
         ret = resolver.resolve(ObResolver::IS_NOT_PREPARED_STMT, *parse_result.result_tree_->children_[0], stmt);
+      }
+
+      // `DESCRIBE <select over file table functions>`: the parser treats it as
+      // EXPLAIN, but the expected behavior is DuckDB style column metadata.
+      // Rewrite it into a plain SELECT over literal rows and resolve that.
+      if (OB_SUCC(ret) && NULL != stmt
+          && stmt::T_EXPLAIN == stmt->get_stmt_type()
+          && sql_is_describe_stmt(context.cur_sql_)) {
+        ObExplainStmt *explain_stmt = static_cast<ObExplainStmt *>(stmt);
+        ObDMLStmt *inner_stmt = explain_stmt->get_explain_query_stmt();
+        if (NULL != inner_stmt && inner_stmt->is_select_stmt()
+            && stmt_contains_file_table(inner_stmt)) {
+          ObSqlString describe_sql;
+          if (OB_FAIL(build_file_describe_sql(*static_cast<ObSelectStmt *>(inner_stmt), describe_sql))) {
+            LOG_WARN("build file describe sql failed", K(ret));
+          } else {
+            ObParser describe_parser(allocator, context.session_info_->get_sql_mode(),
+                                     context.session_info_->get_charsets4parser());
+            ParseResult describe_result;
+            MEMSET(&describe_result, 0, SIZEOF(ParseResult));
+            if (OB_FAIL(describe_parser.parse(describe_sql.string(), describe_result))) {
+              LOG_WARN("parse file describe sql failed", K(ret));
+            } else if (NULL == describe_result.result_tree_
+                       || NULL == describe_result.result_tree_->children_
+                       || NULL == describe_result.result_tree_->children_[0]) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("invalid describe parse result", K(ret));
+            } else {
+              ObStmt *describe_stmt = NULL;
+              HEAP_VAR(ObResolver, describe_resolver, resolver_ctx) {
+                if (OB_FAIL(describe_resolver.resolve(ObResolver::IS_NOT_PREPARED_STMT,
+                                                      *describe_result.result_tree_->children_[0],
+                                                      describe_stmt))) {
+                  LOG_WARN("resolve file describe sql failed", K(ret));
+                } else if (NULL != describe_stmt) {
+                  stmt = describe_stmt;
+                  context.stmt_type_ = stmt->get_stmt_type();
+                }
+              }
+            }
+          }
+        }
       }
 
       // set const param constraint after resolving
