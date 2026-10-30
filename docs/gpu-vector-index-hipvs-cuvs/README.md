@@ -49,6 +49,12 @@ seekdb_cuvs_free
 seekdb_cuvs_cagra_knn
 ```
 
+The build uses NN-Descent with a 64-neighbor output graph, a 128-neighbor
+intermediate graph, and 20 refinement iterations. These settings reduce graph
+construction work and memory relative to the former 128/256/100 configuration;
+run the GPU smoke and task benchmark on the target Radeon to confirm recall and
+build-time improvement for the contest dataset.
+
 Build seekdb with the resulting library:
 
 ```bash

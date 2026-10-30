@@ -33,9 +33,13 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
-  h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 256;
-  h->ip->nn_descent_niter = 100;
+  // Keep CAGRA's construction graph at the standard 2:1 expansion ratio and
+  // avoid over-refining it. The previous 128/256/100 settings spent substantial
+  // GPU time and memory on edges/iterations that the seekdb HNSW workload does
+  // not need; search quality is guarded by the GPU smoke recall checks.
+  h->ip->graph_degree = 64;
+  h->ip->intermediate_graph_degree = 128;
+  h->ip->nn_descent_niter = 20;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
